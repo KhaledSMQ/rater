@@ -33,15 +33,11 @@
 //! 4. **Lock-Free Operations**: Uses DashMap for concurrent access
 //! 5. **Emergency Cleanup**: Aggressive cleanup when approaching limits
 
-use super::{
-    config::RateLimiterConfig,
-    core::RateLimiter,
-    utils::current_time_ms,
-};
+use super::{config::RateLimiterConfig, core::RateLimiter, utils::current_time_ms};
 use dashmap::DashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -186,7 +182,7 @@ impl IpRateLimiterManager {
             .map(|n| n.get())
             .unwrap_or(8)
             .next_power_of_two()
-            .min(64);  // Cap at 64 shards for memory efficiency
+            .min(64); // Cap at 64 shards for memory efficiency
 
         // Pre-size each shard for expected load distribution
         let initial_capacity = (MAX_TRACKED_IPS / num_shards).max(128);
@@ -194,13 +190,13 @@ impl IpRateLimiterManager {
         Self {
             limiters: Arc::new(DashMap::with_capacity_and_hasher_and_shard_amount(
                 initial_capacity,
-                ahash::RandomState::new(),  // Fast, secure hash function
+                ahash::RandomState::new(), // Fast, secure hash function
                 num_shards,
             )),
             active_count: Arc::new(AtomicUsize::new(0)),
             config,
-            cleanup_interval_ms: 60_000,  // 1 minute default
-            inactive_duration_ms: 300_000,  // 5 minutes default
+            cleanup_interval_ms: 60_000,   // 1 minute default
+            inactive_duration_ms: 300_000, // 5 minutes default
             total_created: Arc::new(AtomicU64::new(0)),
             total_cleaned: Arc::new(AtomicU64::new(0)),
             cleanup_in_progress: Arc::new(AtomicBool::new(false)),
@@ -294,7 +290,10 @@ impl IpRateLimiterManager {
 
             // Re-check after cleanup
             if self.active_count.load(Ordering::Acquire) >= MAX_TRACKED_IPS {
-                warn!("Rate limiter capacity reached after cleanup, rejecting IP: {}", ip);
+                warn!(
+                    "Rate limiter capacity reached after cleanup, rejecting IP: {}",
+                    ip
+                );
                 return None;
             }
         }
@@ -324,7 +323,11 @@ impl IpRateLimiterManager {
                 vacant.insert(limiter.clone());
 
                 self.total_created.fetch_add(1, Ordering::Relaxed);
-                debug!("Created new rate limiter for IP: {} (total: {})", ip, prev + 1);
+                debug!(
+                    "Created new rate limiter for IP: {} (total: {})",
+                    ip,
+                    prev + 1
+                );
 
                 Some(limiter)
             }
@@ -337,12 +340,11 @@ impl IpRateLimiterManager {
     /// It uses a lower inactivity threshold and removes the oldest entries first.
     fn emergency_cleanup(&self) {
         // Prevent concurrent emergency cleanups using atomic flag
-        if self.cleanup_in_progress.compare_exchange(
-            false,
-            true,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        ).is_err() {
+        if self
+            .cleanup_in_progress
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             // Another cleanup is already in progress
             return;
         }
@@ -354,7 +356,7 @@ impl IpRateLimiterManager {
 
         let before = self.active_count.load(Ordering::Acquire);
         if before <= CLEANUP_TARGET {
-            return;  // Already below target
+            return; // Already below target
         }
 
         info!("Starting emergency cleanup (current: {} IPs)", before);
@@ -365,7 +367,7 @@ impl IpRateLimiterManager {
 
         // Lower threshold during emergency
         let inactive_threshold = if cfg!(test) {
-            0  // In tests, remove anything we can
+            0 // In tests, remove anything we can
         } else {
             (self.inactive_duration_ms / EMERGENCY_CLEANUP_INACTIVE_FACTOR)
                 .max(EMERGENCY_CLEANUP_MIN_INACTIVE_MS)
@@ -394,7 +396,7 @@ impl IpRateLimiterManager {
         if cfg!(test) && candidates.len() < to_remove_count {
             for entry in self.limiters.iter() {
                 if candidates.iter().any(|(_, ip)| ip == entry.key()) {
-                    continue;  // Skip already collected
+                    continue; // Skip already collected
                 }
 
                 let last_access = entry.value().last_access_ms.value.load(Ordering::Relaxed);
@@ -420,14 +422,19 @@ impl IpRateLimiterManager {
 
         if removed > 0 {
             self.total_cleaned.fetch_add(removed, Ordering::Relaxed);
-            info!("Emergency cleanup removed {} limiters (target was {})", removed, to_remove_count);
+            info!(
+                "Emergency cleanup removed {} limiters (target was {})",
+                removed, to_remove_count
+            );
         }
 
         // Verify we reached the target
         let after = self.active_count.load(Ordering::Acquire);
         if after > CLEANUP_TARGET && removed < to_remove_count as u64 {
-            warn!("Emergency cleanup incomplete: removed {}/{} entries, current count: {}",
-                  removed, to_remove_count, after);
+            warn!(
+                "Emergency cleanup incomplete: removed {}/{} entries, current count: {}",
+                removed, to_remove_count, after
+            );
         }
     }
 
@@ -510,7 +517,7 @@ impl IpRateLimiterManager {
 
         // Adjust threshold based on current usage
         let threshold = if before > CLEANUP_THRESHOLD {
-            self.inactive_duration_ms / 2  // More aggressive when near capacity
+            self.inactive_duration_ms / 2 // More aggressive when near capacity
         } else {
             self.inactive_duration_ms
         };
@@ -520,12 +527,12 @@ impl IpRateLimiterManager {
         // Remove inactive entries
         self.limiters.retain(|ip, limiter| {
             if !limiter.is_inactive(threshold) {
-                true  // Keep active limiters
+                true // Keep active limiters
             } else {
                 debug!("Removing inactive limiter for IP: {}", ip);
                 removed += 1;
                 self.active_count.fetch_sub(1, Ordering::AcqRel);
-                false  // Remove inactive limiter
+                false // Remove inactive limiter
             }
         });
 
@@ -548,7 +555,10 @@ impl IpRateLimiterManager {
         // Shrink if capacity is more than 4x the current size
         if capacity > current_size * 4 && capacity > 1024 {
             self.limiters.shrink_to_fit();
-            debug!("Shrunk limiter map capacity from {} to ~{}", capacity, current_size);
+            debug!(
+                "Shrunk limiter map capacity from {} to ~{}",
+                capacity, current_size
+            );
         }
     }
 
@@ -613,8 +623,7 @@ impl IpRateLimiterManager {
             .spawn(move || {
                 info!(
                     "Started cleanup thread (interval: {}ms, inactive threshold: {}ms)",
-                    manager.cleanup_interval_ms,
-                    manager.inactive_duration_ms
+                    manager.cleanup_interval_ms, manager.inactive_duration_ms
                 );
 
                 loop {
@@ -660,7 +669,7 @@ impl IpRateLimiterManager {
     /// handle.join().unwrap();
     /// ```
     pub fn start_stoppable_cleanup_thread(
-        self: Arc<Self>
+        self: Arc<Self>,
     ) -> (thread::JoinHandle<()>, mpsc::Sender<()>) {
         let (stop_tx, stop_rx) = mpsc::channel();
         let manager = self.clone();
@@ -718,7 +727,8 @@ impl IpRateLimiterManager {
         let count = self.limiters.len();
         self.limiters.clear();
         self.active_count.store(0, Ordering::Release);
-        self.total_cleaned.fetch_add(count as u64, Ordering::Relaxed);
+        self.total_cleaned
+            .fetch_add(count as u64, Ordering::Relaxed);
         info!("Cleared all {} rate limiters", count);
     }
 }
@@ -851,12 +861,11 @@ impl std::fmt::Display for ManagerStats {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
     use crate::MemoryOrdering;
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn test_basic_ip_limiting() {
@@ -890,9 +899,7 @@ mod tests {
     fn test_manager_cleanup() {
         let config = RateLimiterConfig::default();
         let manager = IpRateLimiterManager::with_cleanup_settings(
-            config,
-            1000,
-            50, // Very short inactive duration for testing
+            config, 1000, 50, // Very short inactive duration for testing
         );
 
         // Create some limiters
@@ -983,10 +990,7 @@ mod tests {
             handles.push(handle);
         }
 
-        let results: Vec<u32> = handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect();
+        let results: Vec<u32> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         // Each thread should have acquired some tokens
         for acquired in results {
@@ -1007,7 +1011,9 @@ mod tests {
         // by checking that get_limiter returns None when at capacity
 
         // Manually set the active count to MAX
-        manager.active_count.store(MAX_TRACKED_IPS, Ordering::Release);
+        manager
+            .active_count
+            .store(MAX_TRACKED_IPS, Ordering::Release);
 
         let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         assert!(manager.get_limiter(ip).is_none());
@@ -1041,8 +1047,12 @@ mod tests {
 
         // Should have cleaned up some entries
         let after_cleanup = manager.active_ips();
-        assert!(after_cleanup <= CLEANUP_TARGET + 1,
-                "Expected {} IPs after cleanup, but got {}", CLEANUP_TARGET + 1, after_cleanup);
+        assert!(
+            after_cleanup <= CLEANUP_TARGET + 1,
+            "Expected {} IPs after cleanup, but got {}",
+            CLEANUP_TARGET + 1,
+            after_cleanup
+        );
     }
 
     #[test]
@@ -1075,8 +1085,8 @@ mod tests {
     fn test_cleanup_thread() {
         let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
             RateLimiterConfig::default(),
-            100,  // 100ms cleanup interval
-            50,   // 50ms inactive duration
+            100, // 100ms cleanup interval
+            50,  // 50ms inactive duration
         ));
 
         // Add some IPs
@@ -1141,9 +1151,7 @@ mod tests {
             }));
         }
 
-        let results: Vec<bool> = handles.into_iter()
-            .map(|h| h.join().unwrap())
-            .collect();
+        let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         // All should succeed
         assert!(results.iter().all(|&r| r));
@@ -1187,11 +1195,8 @@ mod tests {
 
     #[test]
     fn test_cleanup_with_active_limiters() {
-        let manager = IpRateLimiterManager::with_cleanup_settings(
-            RateLimiterConfig::default(),
-            1000,
-            100,
-        );
+        let manager =
+            IpRateLimiterManager::with_cleanup_settings(RateLimiterConfig::default(), 1000, 100);
 
         // Create limiters, some active, some inactive
         for i in 0..10 {

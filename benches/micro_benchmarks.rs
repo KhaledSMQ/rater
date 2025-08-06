@@ -4,10 +4,10 @@
 //!
 //! Run with: `cargo bench --bench micro_benchmarks`
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rater::{
-    cpu_relax, current_time_ms, current_time_ns, current_time_us,
-    MemoryOrdering, RateLimiter, RateLimiterConfig,
+    cpu_relax, current_time_ms, current_time_ns, current_time_us, MemoryOrdering, RateLimiter,
+    RateLimiterConfig,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -29,9 +29,7 @@ fn bench_atomic_operations(c: &mut Criterion) {
     for (name, ordering) in &orderings {
         group.bench_function(format!("load_{}", name), |b| {
             let atomic = AtomicU64::new(42);
-            b.iter(|| {
-                black_box(atomic.load(*ordering))
-            });
+            b.iter(|| black_box(atomic.load(*ordering)));
         });
     }
 
@@ -77,27 +75,19 @@ fn bench_time_functions(c: &mut Criterion) {
     let mut group = c.benchmark_group("time_functions");
 
     group.bench_function("current_time_ms", |b| {
-        b.iter(|| {
-            black_box(current_time_ms())
-        });
+        b.iter(|| black_box(current_time_ms()));
     });
 
     group.bench_function("current_time_us", |b| {
-        b.iter(|| {
-            black_box(current_time_us())
-        });
+        b.iter(|| black_box(current_time_us()));
     });
 
     group.bench_function("current_time_ns", |b| {
-        b.iter(|| {
-            black_box(current_time_ns())
-        });
+        b.iter(|| black_box(current_time_ns()));
     });
 
     group.bench_function("std_instant_now", |b| {
-        b.iter(|| {
-            black_box(std::time::Instant::now())
-        });
+        b.iter(|| black_box(std::time::Instant::now()));
     });
 
     group.finish();
@@ -146,9 +136,7 @@ fn bench_available_tokens(c: &mut Criterion) {
     // Full bucket
     group.bench_function("full_bucket", |b| {
         let limiter = RateLimiter::new(1000, 100);
-        b.iter(|| {
-            black_box(limiter.available_tokens())
-        });
+        b.iter(|| black_box(limiter.available_tokens()));
     });
 
     // Empty bucket
@@ -157,9 +145,7 @@ fn bench_available_tokens(c: &mut Criterion) {
         for _ in 0..100 {
             limiter.try_acquire();
         }
-        b.iter(|| {
-            black_box(limiter.available_tokens())
-        });
+        b.iter(|| black_box(limiter.available_tokens()));
     });
 
     // Half full bucket
@@ -168,9 +154,7 @@ fn bench_available_tokens(c: &mut Criterion) {
         for _ in 0..50 {
             limiter.try_acquire();
         }
-        b.iter(|| {
-            black_box(limiter.available_tokens())
-        });
+        b.iter(|| black_box(limiter.available_tokens()));
     });
 
     group.finish();
@@ -184,18 +168,14 @@ fn bench_is_inactive(c: &mut Criterion) {
         let limiter = RateLimiter::new(100, 10);
         limiter.try_acquire(); // Make it active
 
-        b.iter(|| {
-            black_box(limiter.is_inactive(1000))
-        });
+        b.iter(|| black_box(limiter.is_inactive(1000)));
     });
 
     group.bench_function("long_inactive", |b| {
         let limiter = RateLimiter::new(100, 10);
         // Don't use it, so it's been inactive since creation
 
-        b.iter(|| {
-            black_box(limiter.is_inactive(0))
-        });
+        b.iter(|| black_box(limiter.is_inactive(0)));
     });
 
     group.finish();
@@ -229,9 +209,7 @@ fn bench_metrics_calculation(c: &mut Criterion) {
                 limiter.try_acquire(); // Will be rejected
             }
 
-            b.iter(|| {
-                black_box(limiter.metrics())
-            });
+            b.iter(|| black_box(limiter.metrics()));
         });
     }
 
@@ -383,9 +361,7 @@ fn bench_config_validation(c: &mut Criterion) {
 
     group.bench_function("effective_rate_calculation", |b| {
         let config = RateLimiterConfig::new(100, 10, 1000);
-        b.iter(|| {
-            black_box(config.effective_rate_per_second())
-        });
+        b.iter(|| black_box(config.effective_rate_per_second()));
     });
 
     group.finish();

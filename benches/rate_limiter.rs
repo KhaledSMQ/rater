@@ -15,7 +15,7 @@ use std::time::Duration;
 fn bench_single_acquire(c: &mut Criterion) {
     let mut group = c.benchmark_group("single_acquire");
 
-    for tokens in [ 100, 1000, 10000] {
+    for tokens in [100, 1000, 10000] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(
             BenchmarkId::from_parameter(tokens),

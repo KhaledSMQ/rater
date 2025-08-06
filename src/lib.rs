@@ -380,7 +380,6 @@ impl Default for RateLimiterBuilder {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,9 +414,7 @@ mod tests {
 
     #[test]
     fn test_builder_validation() {
-        let result = RateLimiterBuilder::new()
-            .max_tokens(0)
-            .try_build();
+        let result = RateLimiterBuilder::new().max_tokens(0).try_build();
 
         assert!(result.is_err());
     }
@@ -441,10 +438,7 @@ mod tests {
             handles.push(handle);
         }
 
-        let total: u32 = handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .sum();
+        let total: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
 
         // Should acquire exactly 1000 tokens (or very close due to refills)
         assert!(total <= 1000);

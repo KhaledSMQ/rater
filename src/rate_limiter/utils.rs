@@ -1,4 +1,3 @@
-
 //! # Utility Functions (utils.rs)
 //!
 //! Platform-specific optimizations and helper functions for the rate limiter.
@@ -357,7 +356,6 @@ pub(crate) fn unlikely(b: bool) -> bool {
     // For stable Rust, the compiler's branch predictor handles it
     b
 }
-
 
 #[cfg(test)]
 mod tests {

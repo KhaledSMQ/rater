@@ -1,8 +1,8 @@
-use rater::{RateLimiter, RateLimiterConfig, MemoryOrdering, IpRateLimiterManager};
+use rater::{IpRateLimiterManager, MemoryOrdering, RateLimiter, RateLimiterConfig};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use std::net::IpAddr;
 
 #[test]
 fn test_refill_timing_accuracy() {
@@ -57,16 +57,15 @@ fn test_sustained_load_scenario() {
         }));
     }
 
-    let results: Vec<(usize, u32, u32)> = handles
-        .into_iter()
-        .map(|h| h.join().unwrap())
-        .collect();
+    let results: Vec<(usize, u32, u32)> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
     let total_acquired: u32 = results.iter().map(|(_, a, _)| a).sum();
     let total_rejected: u32 = results.iter().map(|(_, _, r)| r).sum();
 
-    println!("Sustained load test - Acquired: {}, Rejected: {}",
-             total_acquired, total_rejected);
+    println!(
+        "Sustained load test - Acquired: {}, Rejected: {}",
+        total_acquired, total_rejected
+    );
 
     // Should have both acquisitions and rejections under load
     assert!(total_acquired > 0);
@@ -83,8 +82,8 @@ fn test_sustained_load_scenario() {
 fn test_ip_manager_lifecycle() {
     let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
         RateLimiterConfig::per_second(10),
-        200,  // cleanup interval
-        100,  // inactive duration
+        200, // cleanup interval
+        100, // inactive duration
     ));
 
     // Phase 1: Add IPs
@@ -102,7 +101,8 @@ fn test_ip_manager_lifecycle() {
 
     // Phase 4: Keep some IPs active by continuously accessing them
     let active_ips = 10;
-    for _ in 0..3 {  // Access multiple times to ensure they stay active
+    for _ in 0..3 {
+        // Access multiple times to ensure they stay active
         for i in 0..active_ips {
             let ip: IpAddr = format!("192.168.1.{}", i).parse().unwrap();
             manager.try_acquire(ip);
@@ -117,7 +117,12 @@ fn test_ip_manager_lifecycle() {
     let remaining = manager.active_ips();
     println!("Remaining IPs after cleanup: {}", remaining);
     assert!(remaining < 50, "Should have cleaned up some IPs");
-    assert!(remaining >= active_ips, "Should have kept at least {} active IPs, but only {} remain", active_ips, remaining);
+    assert!(
+        remaining >= active_ips,
+        "Should have kept at least {} active IPs, but only {} remain",
+        active_ips,
+        remaining
+    );
 
     // Phase 6: Stop cleanup thread
     stop_tx.send(()).unwrap();

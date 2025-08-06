@@ -123,7 +123,7 @@ impl RateLimiterMetrics {
     pub fn success_rate(&self) -> f64 {
         let total = self.total_acquired + self.total_rejected;
         if total == 0 {
-            1.0  // No requests yet, assume success
+            1.0 // No requests yet, assume success
         } else {
             self.total_acquired as f64 / total as f64
         }
@@ -488,7 +488,6 @@ impl fmt::Display for HealthStatus {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,12 +568,13 @@ mod tests {
         assert!(HealthStatus::Degraded.is_unhealthy());
         assert!(HealthStatus::Critical.is_unhealthy());
 
-        assert_eq!(
-            HealthStatus::Healthy.suggested_action(),
-            "No action needed"
-        );
-        assert!(HealthStatus::Degraded.suggested_action().contains("Monitor"));
-        assert!(HealthStatus::Critical.suggested_action().contains("Immediate"));
+        assert_eq!(HealthStatus::Healthy.suggested_action(), "No action needed");
+        assert!(HealthStatus::Degraded
+            .suggested_action()
+            .contains("Monitor"));
+        assert!(HealthStatus::Critical
+            .suggested_action()
+            .contains("Immediate"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
-use rater::{IpRateLimiterManager, RateLimiterConfig};
 use core::net::{IpAddr, Ipv4Addr};
+use rater::{IpRateLimiterManager, RateLimiterConfig};
 
 fn main() {
     let config = RateLimiterConfig::per_second(10);

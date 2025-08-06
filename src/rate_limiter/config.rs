@@ -294,7 +294,7 @@ impl RateLimiterConfig {
     /// ```
     pub fn per_second(requests_per_second: u32) -> Self {
         Self {
-            max_tokens: (requests_per_second * 2) as u64,  // 2x burst capacity
+            max_tokens: (requests_per_second * 2) as u64, // 2x burst capacity
             refill_rate: requests_per_second,
             refill_interval_ms: 1000,
             ordering: MemoryOrdering::default(),
@@ -443,7 +443,6 @@ impl RateLimiterConfig {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,8 +509,7 @@ mod tests {
 
     #[test]
     fn test_config_with_burst_multiplier() {
-        let config = RateLimiterConfig::per_second(10)
-            .with_burst_multiplier(5);
+        let config = RateLimiterConfig::per_second(10).with_burst_multiplier(5);
 
         assert_eq!(config.max_tokens, 50);
         assert_eq!(config.refill_rate, 10);
@@ -529,8 +527,7 @@ mod tests {
 
     #[test]
     fn test_config_with_ordering() {
-        let config = RateLimiterConfig::default()
-            .with_ordering(MemoryOrdering::Sequential);
+        let config = RateLimiterConfig::default().with_ordering(MemoryOrdering::Sequential);
 
         assert_eq!(config.ordering, MemoryOrdering::Sequential);
     }

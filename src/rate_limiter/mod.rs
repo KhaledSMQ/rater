@@ -73,4 +73,4 @@ pub use manager::{IpRateLimiterManager, ManagerStats};
 pub use metrics::{HealthStatus, RateLimiterMetrics};
 
 /// Utility functions for time and CPU optimizations
-pub use utils::{cpu_relax, current_time_ms, current_time_us, current_time_ns};
+pub use utils::{cpu_relax, current_time_ms, current_time_ns, current_time_us};

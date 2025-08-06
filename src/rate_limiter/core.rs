@@ -190,8 +190,8 @@ impl TokenOps for AtomicU32 {
             success,
             failure,
         )
-            .map(|v| v as u64)
-            .map_err(|v| v as u64)
+        .map(|v| v as u64)
+        .map_err(|v| v as u64)
     }
 
     #[inline(always)]
@@ -209,8 +209,8 @@ impl TokenOps for AtomicU32 {
             success,
             failure,
         )
-            .map(|v| v as u64)
-            .map_err(|v| v as u64)
+        .map(|v| v as u64)
+        .map_err(|v| v as u64)
     }
 }
 
@@ -257,7 +257,6 @@ impl TokenOps for AtomicU32 {
 pub struct RateLimiter {
     // Hot path fields - accessed frequently during normal operation
     // These are cache-aligned to prevent false sharing between CPU cores
-
     /// Current number of available tokens (cache-aligned for performance)
     tokens: CacheAligned<TokenCounter>,
 
@@ -269,7 +268,6 @@ pub struct RateLimiter {
     pub(crate) last_access_ms: CacheAligned<AtomicU64>,
 
     // Backpressure tracking - helps detect when system is under load
-
     /// Count of consecutive failed acquisition attempts
     /// High values indicate the system is under pressure
     consecutive_rejections: AtomicU32,
@@ -279,7 +277,6 @@ pub struct RateLimiter {
     max_wait_time_ns: AtomicU64,
 
     // Configuration fields (cold path - accessed less frequently)
-
     /// Maximum tokens the bucket can hold (burst capacity)
     pub(crate) max_tokens: u64,
 
@@ -293,7 +290,6 @@ pub struct RateLimiter {
     ordering: MemoryOrdering,
 
     // Metrics fields (cold path - accessed for monitoring)
-
     /// Total number of tokens successfully acquired
     total_acquired: AtomicU64,
 
@@ -350,7 +346,9 @@ impl RateLimiter {
     /// let limiter = RateLimiter::with_config(config);
     /// ```
     pub fn with_config(config: RateLimiterConfig) -> Self {
-        config.validate().expect("Invalid rate limiter configuration");
+        config
+            .validate()
+            .expect("Invalid rate limiter configuration");
 
         let now_ms = current_time_ms();
 
@@ -539,18 +537,20 @@ impl RateLimiter {
     pub fn try_acquire_n(&self, n: u64) -> bool {
         // Fast paths for common cases
         if n == 0 {
-            return true;  // Acquiring 0 tokens always succeeds
+            return true; // Acquiring 0 tokens always succeeds
         }
         if n == 1 {
-            return self.try_acquire();  // Use optimized single-token path
+            return self.try_acquire(); // Use optimized single-token path
         }
         if n > self.max_tokens {
             self.on_rejection(n);
-            return false;  // Can never acquire more than max
+            return false; // Can never acquire more than max
         }
 
         let now_ms = current_time_ms();
-        self.last_access_ms.value.store(now_ms, self.ordering.store());
+        self.last_access_ms
+            .value
+            .store(now_ms, self.ordering.store());
 
         // Check for refill before attempting acquisition
         self.refill_if_needed(now_ms);
@@ -632,7 +632,10 @@ impl RateLimiter {
                     retries += 1;
 
                     if retries >= MAX_CAS_RETRIES {
-                        warn!("Rate limiter CAS retry limit reached after {} attempts", retries);
+                        warn!(
+                            "Rate limiter CAS retry limit reached after {} attempts",
+                            retries
+                        );
                         self.on_rejection(n);
                         return false;
                     }
@@ -667,7 +670,8 @@ impl RateLimiter {
     #[inline]
     fn on_rejection(&self, n: u64) {
         self.total_rejected.fetch_add(1, self.ordering.rmw());
-        self.consecutive_rejections.fetch_add(1, self.ordering.rmw());
+        self.consecutive_rejections
+            .fetch_add(1, self.ordering.rmw());
     }
 
     /// Checks if tokens need to be refilled and performs the refill if necessary.
@@ -695,7 +699,7 @@ impl RateLimiter {
 
         let elapsed = now_ms.saturating_sub(last_refill);
         if elapsed < self.refill_interval_ms {
-            return;  // Not time for refill yet
+            return; // Not time for refill yet
         }
 
         // Calculate how many refill periods have passed
@@ -752,7 +756,11 @@ impl RateLimiter {
             ) {
                 Ok(_) => {
                     self.total_refills.fetch_add(1, self.ordering.rmw());
-                    debug!("Refilled {} tokens (periods: {})", new_tokens - current, periods);
+                    debug!(
+                        "Refilled {} tokens (periods: {})",
+                        new_tokens - current,
+                        periods
+                    );
                     break;
                 }
                 Err(actual) => {
@@ -1006,9 +1014,15 @@ impl RateLimiter {
         let now_ms = current_time_ms();
 
         // Reset all state to initial values
-        self.tokens.value.store(self.max_tokens, self.ordering.store());
-        self.last_refill_ms.value.store(now_ms, self.ordering.store());
-        self.last_access_ms.value.store(now_ms, self.ordering.store());
+        self.tokens
+            .value
+            .store(self.max_tokens, self.ordering.store());
+        self.last_refill_ms
+            .value
+            .store(now_ms, self.ordering.store());
+        self.last_access_ms
+            .value
+            .store(now_ms, self.ordering.store());
         self.consecutive_rejections.store(0, self.ordering.store());
         self.max_wait_time_ns.store(0, self.ordering.store());
         self.total_acquired.store(0, self.ordering.store());
@@ -1032,7 +1046,6 @@ impl std::fmt::Debug for RateLimiter {
 // All operations use atomic instructions with proper memory ordering
 unsafe impl Send for RateLimiter {}
 unsafe impl Sync for RateLimiter {}
-
 
 #[cfg(test)]
 mod tests {
@@ -1064,7 +1077,6 @@ mod tests {
         limiter.add_tokens(u64::MAX);
         assert_eq!(limiter.available_tokens(), u64::MAX);
     }
-
 
     #[test]
     fn test_refill_mechanism() {

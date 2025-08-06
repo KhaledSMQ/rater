@@ -1,8 +1,8 @@
 //! Basic usage example for the rater crate.
 
-use rater::{RateLimiter, RateLimiterConfig, MemoryOrdering};
-use std::thread;
 use core::time::Duration;
+use rater::{MemoryOrdering, RateLimiter, RateLimiterConfig};
+use std::thread;
 
 fn main() {
     println!("=== Basic Rate Limiter Example ===\n");
@@ -53,7 +53,10 @@ fn simple_example() {
         }
     }
 
-    println!("   Results: {} successful, {} rate limited", successful, failed);
+    println!(
+        "   Results: {} successful, {} rate limited",
+        successful, failed
+    );
 }
 
 fn custom_config_example() {
@@ -61,14 +64,17 @@ fn custom_config_example() {
 
     // Create a configuration for 100 requests per second
     let config = RateLimiterConfig::per_second(100)
-        .with_burst_multiplier(2)  // Allow 2x burst capacity
-        .with_ordering(MemoryOrdering::Relaxed);  // Use relaxed ordering for better performance
+        .with_burst_multiplier(2) // Allow 2x burst capacity
+        .with_ordering(MemoryOrdering::Relaxed); // Use relaxed ordering for better performance
 
     let limiter = RateLimiter::with_config(config.clone());
 
     println!("   Configuration:");
     println!("   - Max tokens: {}", config.max_tokens);
-    println!("   - Refill rate: {} tokens/second", config.effective_rate_per_second());
+    println!(
+        "   - Refill rate: {} tokens/second",
+        config.effective_rate_per_second()
+    );
     println!("   - Memory ordering: {:?}", config.ordering);
 
     // Test burst capacity
@@ -77,7 +83,10 @@ fn custom_config_example() {
         burst_count += 1;
     }
 
-    println!("   Burst capacity test: {} requests processed immediately", burst_count);
+    println!(
+        "   Burst capacity test: {} requests processed immediately",
+        burst_count
+    );
 }
 
 fn bulk_operations_example() {
@@ -96,7 +105,10 @@ fn bulk_operations_example() {
 
     // Try to acquire 50 tokens (should fail)
     if !limiter.try_acquire_n(50) {
-        println!("   ❌ Cannot acquire 50 tokens (only {} available)", limiter.available_tokens());
+        println!(
+            "   ❌ Cannot acquire 50 tokens (only {} available)",
+            limiter.available_tokens()
+        );
     }
 
     // Add bonus tokens manually
@@ -121,10 +133,22 @@ fn metrics_example() {
     println!("   Performance Metrics:");
     println!("   - Total requests: {}", metrics.total_requests());
     println!("   - Success rate: {:.2}%", metrics.success_rate() * 100.0);
-    println!("   - Rejection rate: {:.2}%", metrics.rejection_rate() * 100.0);
-    println!("   - Current utilization: {:.2}%", metrics.utilization() * 100.0);
-    println!("   - Available tokens: {}/{}", metrics.current_tokens, metrics.max_tokens);
-    println!("   - Consecutive rejections: {}", metrics.consecutive_rejections);
+    println!(
+        "   - Rejection rate: {:.2}%",
+        metrics.rejection_rate() * 100.0
+    );
+    println!(
+        "   - Current utilization: {:.2}%",
+        metrics.utilization() * 100.0
+    );
+    println!(
+        "   - Available tokens: {}/{}",
+        metrics.current_tokens, metrics.max_tokens
+    );
+    println!(
+        "   - Consecutive rejections: {}",
+        metrics.consecutive_rejections
+    );
 
     // Check health status
     let health = metrics.health_status();
@@ -138,7 +162,7 @@ fn refill_example() {
     let config = RateLimiterConfig {
         max_tokens: 5,
         refill_rate: 5,
-        refill_interval_ms: 1000,  // Refill every second
+        refill_interval_ms: 1000, // Refill every second
         ordering: MemoryOrdering::AcquireRelease,
     };
 
@@ -153,7 +177,10 @@ fn refill_example() {
         }
     }
 
-    println!("   All tokens exhausted, available: {}", limiter.available_tokens());
+    println!(
+        "   All tokens exhausted, available: {}",
+        limiter.available_tokens()
+    );
 
     // Try to acquire without waiting (should fail)
     if !limiter.try_acquire() {
@@ -164,7 +191,10 @@ fn refill_example() {
     println!("   Waiting 1 second for refill...");
     thread::sleep(Duration::from_secs(1));
 
-    println!("   After refill, available tokens: {}", limiter.available_tokens());
+    println!(
+        "   After refill, available tokens: {}",
+        limiter.available_tokens()
+    );
 
     // Should be able to acquire again
     if limiter.try_acquire() {
@@ -177,7 +207,10 @@ fn refill_example() {
 
     let metrics = limiter.metrics();
     println!("   After reset:");
-    println!("   - Available tokens: {}/{}", metrics.current_tokens, metrics.max_tokens);
+    println!(
+        "   - Available tokens: {}/{}",
+        metrics.current_tokens, metrics.max_tokens
+    );
     println!("   - Total acquired: {}", metrics.total_acquired);
     println!("   - Total rejected: {}", metrics.total_rejected);
 }
