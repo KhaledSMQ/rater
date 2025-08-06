@@ -1,0 +1,84 @@
+[package]
+name = "rater"
+version = "0.1.0"
+authors = ["Khaled <khaledsmq@gmail.com>"]
+edition = "2021"
+rust-version = "1.70.0"
+description = "High-performance, lock-free, thread-safe rate limiter using token bucket algorithm with per-IP rate limiting support"
+documentation = "https://docs.rs/rater"
+homepage = "https://github.com/khaledsmq/rater"
+repository = "https://github.com/khaledsmq/rater"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["rate-limiter", "rate-limiting", "throttle", "token-bucket", "concurrent"]
+categories = ["network-programming", "web-programming", "concurrency", "algorithms", "asynchronous"]
+exclude = [
+    ".github/*",
+    ".gitignore",
+    "tests/*",
+    "benches/*",
+    "examples/*",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[dependencies]
+dashmap = "6"
+ahash = "0.8"
+tracing = "0.1"
+rand = "0.9.2"
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+optional = true
+
+[dependencies.serde_json]
+version = "1.0"
+optional = true
+
+[dev-dependencies]
+criterion = "0.7"
+rand = "0.9.2"
+
+[features]
+default = []
+serde = ["dep:serde", "dep:serde_json"]
+# Removed tokio feature since it's not used
+full = ["serde"]
+
+[[bench]]
+name = "rate_limiter"
+path = "benches/rate_limiter.rs"
+harness = false
+
+[[bench]]
+name = "micro_benchmarks"
+harness = false
+path = "benches/micro_benchmarks.rs"
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "ip_limiting"
+path = "examples/ip_limiting.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+inherits = "release"
