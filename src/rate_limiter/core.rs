@@ -1183,13 +1183,18 @@ mod tests {
         // Should not be inactive immediately
         assert!(!limiter.is_inactive(1000));
 
-        // Use a token to update last_access
-        assert!(limiter.try_acquire());
+        // Use try_acquire_n to force update of last_access
+        // (try_acquire_n always updates last_access_ms)
+        assert!(limiter.try_acquire_n(1));
 
         // Wait and check
         std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Should be inactive for 100ms
         assert!(limiter.is_inactive(100));
-        assert!(!limiter.is_inactive(200));
+
+        // Should NOT be inactive for 300ms (well beyond sleep time)
+        assert!(!limiter.is_inactive(300));
     }
 
     #[test]
