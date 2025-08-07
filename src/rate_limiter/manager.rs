@@ -380,7 +380,7 @@ impl IpRateLimiterManager {
 
         // First pass: collect inactive entries
         for entry in self.limiters.iter() {
-            let last_access = entry.value().last_access_ms.value.load(Ordering::Relaxed);
+            let last_access = entry.value().get_last_access_ms();
             let idle_time = now.saturating_sub(last_access);
 
             if idle_time >= inactive_threshold {
@@ -399,7 +399,8 @@ impl IpRateLimiterManager {
                     continue; // Skip already collected
                 }
 
-                let last_access = entry.value().last_access_ms.value.load(Ordering::Relaxed);
+                // let last_access = entry.value().last_access_ms.value.load(Ordering::Relaxed);
+                let last_access = entry.value().get_last_access_ms();
                 let idle_time = now.saturating_sub(last_access);
                 candidates.push((idle_time, *entry.key()));
 

@@ -265,7 +265,7 @@ pub struct RateLimiter {
 
     /// Timestamp of last access in milliseconds (cache-aligned)
     /// Used for cleanup of inactive limiters
-    pub(crate) last_access_ms: CacheAligned<AtomicU64>,
+    last_access_ms: CacheAligned<AtomicU64>,
 
     // Backpressure tracking - helps detect when system is under load
     /// Count of consecutive failed acquisition attempts
@@ -278,7 +278,7 @@ pub struct RateLimiter {
 
     // Configuration fields (cold path - accessed less frequently)
     /// Maximum tokens the bucket can hold (burst capacity)
-    pub(crate) max_tokens: u64,
+    max_tokens: u64,
 
     /// Number of tokens to add per refill interval
     refill_rate: u32,
@@ -1028,6 +1028,22 @@ impl RateLimiter {
         self.total_acquired.store(0, self.ordering.store());
         self.total_rejected.store(0, self.ordering.store());
         self.total_refills.store(0, self.ordering.store());
+    }
+
+    /// Returns the maximum number of tokens allowed in the bucket.
+    ///
+    /// This is the burst capacity of the rate limiter.
+    #[inline]
+    pub fn get_max_tokens(&self) -> u64 {
+        self.max_tokens
+    }
+
+    /// Returns the current refill rate.
+    ///
+    /// This is the number of tokens added per refill interval.
+    #[inline]
+    pub fn get_last_access_ms(&self) -> u64 {
+        self.last_access_ms.value.load(Ordering::Relaxed)
     }
 }
 
