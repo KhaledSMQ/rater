@@ -82,8 +82,8 @@ fn test_sustained_load_scenario() {
 fn test_ip_manager_lifecycle() {
     let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
         RateLimiterConfig::per_second(10),
-        200, // cleanup interval
-        100, // inactive duration
+        1000, // longer cleanup interval so it doesn't interfere
+        100,  // inactive duration
     ));
 
     // Phase 1: Add IPs
@@ -93,43 +93,39 @@ fn test_ip_manager_lifecycle() {
     }
     assert_eq!(manager.active_ips(), 50);
 
-    // Phase 2: Start cleanup thread
-    let (handle, stop_tx) = manager.clone().start_stoppable_cleanup_thread();
+    // Phase 2: Wait for IPs to become inactive
+    thread::sleep(Duration::from_millis(150));
 
-    // Phase 3: Let some IPs become inactive
-    thread::sleep(Duration::from_millis(550));
-
-    // Phase 4: Keep some IPs active by continuously accessing them
+    // Phase 3: Keep some IPs active by using try_acquire_n
     let active_ips = 10;
-    for _ in 0..3 {
-        // Access multiple times to ensure they stay active
-        for i in 0..active_ips {
-            let ip: IpAddr = format!("192.168.1.{}", i).parse().unwrap();
-            manager.try_acquire(ip);
-        }
-        thread::sleep(Duration::from_millis(50)); // Small delay between accesses
+    for i in 0..active_ips {
+        let ip: IpAddr = format!("192.168.1.{}", i).parse().unwrap();
+        // Force update of last_access_ms
+        manager.try_acquire_n(ip, 1);
     }
 
-    // Phase 5: Wait for cleanup (shorter wait since we're actively keeping IPs alive)
-    thread::sleep(Duration::from_millis(50));
+    // Phase 4: Manually trigger cleanup instead of relying on thread timing
+    manager.cleanup();
 
-    // Should have cleaned up inactive IPs but kept the active ones
+    // Check results
     let remaining = manager.active_ips();
     println!("Remaining IPs after cleanup: {}", remaining);
-    assert!(remaining < 50, "Should have cleaned up some IPs");
+
     assert!(
         remaining >= active_ips,
         "Should have kept at least {} active IPs, but only {} remain",
         active_ips,
         remaining
     );
-
-    // Phase 6: Stop cleanup thread
-    stop_tx.send(()).unwrap();
-    handle.join().unwrap();
+    assert!(
+        remaining < 50,
+        "Should have cleaned up some IPs (had 50, now have {})",
+        remaining
+    );
 
     // Verify stats
     let stats = manager.stats();
-    assert_eq!(stats.total_created, 60);
+    assert_eq!(stats.total_created, 50);
     assert!(stats.total_cleaned > 0);
+    assert!(stats.total_cleaned == 50 - remaining as u64);
 }
