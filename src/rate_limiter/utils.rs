@@ -24,7 +24,8 @@
 //!     └─ Standard spin loop hints
 //! ```
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // Architecture-specific cache line sizes
 // These values are critical for preventing false sharing between CPU cores
@@ -40,6 +41,11 @@ pub const CACHE_LINE_SIZE: usize = 64;
 /// Many ARM processors use 128-byte cache lines for better performance.
 #[cfg(target_arch = "aarch64")]
 pub const CACHE_LINE_SIZE: usize = 128;
+
+// Monotonic time base to prevent issues when the system clock jumps.
+// We capture the wall-clock epoch milliseconds at process start,
+// then advance using a monotonic Instant to compute 'now'.
+static START_TIME_BASE: OnceLock<(Instant, u64)> = OnceLock::new();
 
 /// Default cache line size for other architectures.
 ///
@@ -83,32 +89,21 @@ pub const CACHE_LINE_SIZE: usize = 64;
 pub fn cpu_relax() {
     #[cfg(target_arch = "x86_64")]
     {
-        // Use PAUSE instruction on x86_64 for better spin-wait performance
-        // PAUSE improves performance of spin loops by:
-        // 1. Reducing power consumption
-        // 2. Avoiding memory order violations
-        // 3. Giving hint to CPU about the spin loop
-        #[cfg(target_feature = "sse2")]
+        #[cfg(any(target_feature = "sse2", target_feature = "sse"))]
         unsafe {
             std::arch::x86_64::_mm_pause();
         }
-        #[cfg(not(target_feature = "sse2"))]
+        #[cfg(not(any(target_feature = "sse2", target_feature = "sse")))]
         {
-            // Fallback for older x86_64 CPUs without SSE2
             std::hint::spin_loop();
         }
     }
-
     #[cfg(target_arch = "aarch64")]
     {
-        // Use YIELD instruction on ARM64
-        // This hints to the CPU that we're in a spin loop
         std::hint::spin_loop();
     }
-
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        // Generic fallback for other architectures
         std::hint::spin_loop();
     }
 }
@@ -128,10 +123,14 @@ pub fn cpu_relax() {
 /// ```
 #[inline(always)]
 pub fn current_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    let (start, base_ms) = START_TIME_BASE.get_or_init(|| {
+        let epoch_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        (Instant::now(), epoch_ms)
+    });
+    base_ms.saturating_add(start.elapsed().as_millis() as u64)
 }
 
 /// Returns the current time in microseconds since UNIX epoch.
@@ -150,10 +149,16 @@ pub fn current_time_ms() -> u64 {
 /// ```
 #[inline(always)]
 pub fn current_time_us() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64
+    let (start, base_ms) = START_TIME_BASE.get_or_init(|| {
+        let epoch_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        (Instant::now(), epoch_ms)
+    });
+    base_ms
+        .saturating_mul(1000)
+        .saturating_add(start.elapsed().as_micros() as u64)
 }
 
 /// Returns the current time in nanoseconds since UNIX epoch.
@@ -173,10 +178,16 @@ pub fn current_time_us() -> u64 {
 /// ```
 #[inline(always)]
 pub fn current_time_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64
+    let (start, base_ms) = START_TIME_BASE.get_or_init(|| {
+        let epoch_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        (Instant::now(), epoch_ms)
+    });
+    base_ms
+        .saturating_mul(1_000_000)
+        .saturating_add(start.elapsed().as_nanos() as u64)
 }
 
 /// Cache-aligned wrapper for values to prevent false sharing.
@@ -206,66 +217,55 @@ pub fn current_time_ns() -> u64 {
 ///
 #[cfg(target_arch = "x86_64")]
 #[repr(C, align(64))]
-pub(crate) struct CacheAligned<T> {
-    /// The wrapped value, aligned to cache line boundary
-    pub value: T,
-}
-
+pub(crate) struct CacheAligned<T>(pub T);
 #[cfg(target_arch = "aarch64")]
 #[repr(C, align(128))]
-pub(crate) struct CacheAligned<T> {
-    /// The wrapped value, aligned to cache line boundary
-    pub value: T,
-}
-
+pub(crate) struct CacheAligned<T>(pub T);
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[repr(C, align(64))]
-pub(crate) struct CacheAligned<T> {
-    /// The wrapped value, aligned to cache line boundary
-    pub value: T,
-}
+pub(crate) struct CacheAligned<T>(pub T);
 
 impl<T> CacheAligned<T> {
     /// Creates a new cache-aligned value.
     #[inline(always)]
     pub const fn new(value: T) -> Self {
-        Self { value }
+        Self(value)
     }
 
     /// Gets a reference to the inner value.
     #[inline(always)]
     pub fn get(&self) -> &T {
-        &self.value
+        &self.0
     }
 
     /// Gets a mutable reference to the inner value.
     #[inline(always)]
     pub fn get_mut(&mut self) -> &mut T {
-        &mut self.value
+        &mut self.0
     }
 
     /// Consumes the wrapper and returns the inner value.
     #[inline(always)]
     pub fn into_inner(self) -> T {
-        self.value
+        self.0
     }
 }
 
 impl<T: Default> Default for CacheAligned<T> {
     fn default() -> Self {
-        Self::new(T::default())
+        Self(T::default())
     }
 }
 
 impl<T: Clone> Clone for CacheAligned<T> {
     fn clone(&self) -> Self {
-        Self::new(self.value.clone())
+        Self(self.0.clone())
     }
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for CacheAligned<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.value.fmt(f)
+        self.0.fmt(f)
     }
 }
 
@@ -396,7 +396,7 @@ mod tests {
         let aligned = CacheAligned::new(AtomicU64::new(42));
 
         // Verify the value is accessible
-        assert_eq!(aligned.value.load(std::sync::atomic::Ordering::Relaxed), 42);
+        assert_eq!(aligned.0.load(std::sync::atomic::Ordering::Relaxed), 42);
     }
 
     #[test]

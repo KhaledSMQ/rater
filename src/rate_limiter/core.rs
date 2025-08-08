@@ -419,14 +419,14 @@ impl RateLimiter {
 
         // Optimization: Only update last_access periodically to reduce contention
         // This atomic variable is used for cleanup detection, not critical path
-        let last = self.last_access_ms.value.load(Ordering::Relaxed);
+        let last = self.last_access_ms.0.load(Ordering::Relaxed);
         if now_ms.saturating_sub(last) > LAST_ACCESS_UPDATE_INTERVAL_MS {
-            self.last_access_ms.value.store(now_ms, Ordering::Relaxed);
+            self.last_access_ms.0.store(now_ms, Ordering::Relaxed);
         }
 
         // Check if refill needed before attempting acquisition
         // This reduces failed attempts when tokens are depleted
-        let last_refill = self.last_refill_ms.value.load(Ordering::Relaxed);
+        let last_refill = self.last_refill_ms.0.load(Ordering::Relaxed);
         if now_ms.saturating_sub(last_refill) >= self.refill_interval_ms {
             self.refill_if_needed(now_ms);
         }
@@ -434,7 +434,7 @@ impl RateLimiter {
         // Optimized single-token acquisition with bounded retries
         let mut retries = 0;
         loop {
-            let current = self.tokens.value.load(self.ordering.load());
+            let current = self.tokens.0.load(self.ordering.load());
 
             // Fast path: no tokens available
             if current == 0 {
@@ -443,7 +443,7 @@ impl RateLimiter {
             }
 
             // Try to atomically decrement the token count
-            match self.tokens.value.compare_exchange_weak(
+            match self.tokens.0.compare_exchange_weak(
                 current,
                 current - 1,
                 self.ordering.rmw(),
@@ -548,9 +548,7 @@ impl RateLimiter {
         }
 
         let now_ms = current_time_ms();
-        self.last_access_ms
-            .value
-            .store(now_ms, self.ordering.store());
+        self.last_access_ms.0.store(now_ms, self.ordering.store());
 
         // Check for refill before attempting acquisition
         self.refill_if_needed(now_ms);
@@ -576,7 +574,7 @@ impl RateLimiter {
         let mut repeat_count = 0;
 
         loop {
-            let current = self.tokens.value.load(self.ordering.load());
+            let current = self.tokens.0.load(self.ordering.load());
 
             // ABA problem detection: Check if we're seeing the same value repeatedly
             // This can indicate that other threads are modifying and restoring the value
@@ -584,7 +582,7 @@ impl RateLimiter {
                 repeat_count += 1;
                 if repeat_count >= MAX_REPEAT_COUNT {
                     // Use strong CAS to break potential ABA cycle
-                    match self.tokens.value.compare_exchange(
+                    match self.tokens.0.compare_exchange(
                         current,
                         current.saturating_sub(n),
                         self.ordering.rmw(),
@@ -612,7 +610,7 @@ impl RateLimiter {
             }
 
             // Try to atomically acquire the tokens
-            match self.tokens.value.compare_exchange_weak(
+            match self.tokens.0.compare_exchange_weak(
                 current,
                 current - n,
                 self.ordering.rmw(),
@@ -695,7 +693,7 @@ impl RateLimiter {
     /// ```
     #[inline]
     fn refill_if_needed(&self, now_ms: u64) {
-        let last_refill = self.last_refill_ms.value.load(self.ordering.load());
+        let last_refill = self.last_refill_ms.0.load(self.ordering.load());
 
         let elapsed = now_ms.saturating_sub(last_refill);
         if elapsed < self.refill_interval_ms {
@@ -711,7 +709,7 @@ impl RateLimiter {
         let new_refill_time = last_refill + (periods * self.refill_interval_ms);
 
         // Try to claim the refill operation atomically
-        if let Ok(_) = self.last_refill_ms.value.compare_exchange(
+        if let Ok(_) = self.last_refill_ms.0.compare_exchange(
             last_refill,
             new_refill_time,
             self.ordering.rmw(),
@@ -742,13 +740,13 @@ impl RateLimiter {
             .min(self.max_tokens);
 
         let mut retries = 0;
-        let mut current = self.tokens.value.load(self.ordering.load());
+        let mut current = self.tokens.0.load(self.ordering.load());
 
         loop {
             // Cap at max_tokens to prevent overflow
             let new_tokens = current.saturating_add(tokens_to_add).min(self.max_tokens);
 
-            match self.tokens.value.compare_exchange_weak(
+            match self.tokens.0.compare_exchange_weak(
                 current,
                 new_tokens,
                 self.ordering.rmw(),
@@ -865,7 +863,7 @@ impl RateLimiter {
     #[inline]
     pub fn available_tokens(&self) -> u64 {
         self.refill_if_needed(current_time_ms());
-        self.tokens.value.load(self.ordering.load())
+        self.tokens.0.load(self.ordering.load())
     }
 
     /// Checks if the rate limiter has been inactive for a specified duration.
@@ -892,7 +890,7 @@ impl RateLimiter {
     #[inline]
     pub fn is_inactive(&self, inactive_duration_ms: u64) -> bool {
         let now_ms = current_time_ms();
-        let last_ms = self.last_access_ms.value.load(self.ordering.load());
+        let last_ms = self.last_access_ms.0.load(self.ordering.load());
         now_ms.saturating_sub(last_ms) > inactive_duration_ms
     }
 
@@ -919,7 +917,7 @@ impl RateLimiter {
             total_acquired: self.total_acquired.load(ordering),
             total_rejected: self.total_rejected.load(ordering),
             total_refills: self.total_refills.load(ordering),
-            current_tokens: self.tokens.value.load(ordering),
+            current_tokens: self.tokens.0.load(ordering),
             max_tokens: self.max_tokens,
             consecutive_rejections: self.consecutive_rejections.load(ordering),
             max_wait_time_ns: self.max_wait_time_ns.load(ordering),
@@ -953,12 +951,12 @@ impl RateLimiter {
     #[inline]
     pub fn add_tokens(&self, n: u64) {
         let mut retries = 0;
-        let mut current = self.tokens.value.load(self.ordering.load());
+        let mut current = self.tokens.0.load(self.ordering.load());
 
         loop {
             let new_tokens = current.saturating_add(n).min(self.max_tokens);
 
-            match self.tokens.value.compare_exchange_weak(
+            match self.tokens.0.compare_exchange_weak(
                 current,
                 new_tokens,
                 self.ordering.rmw(),
@@ -1014,15 +1012,9 @@ impl RateLimiter {
         let now_ms = current_time_ms();
 
         // Reset all state to initial values
-        self.tokens
-            .value
-            .store(self.max_tokens, self.ordering.store());
-        self.last_refill_ms
-            .value
-            .store(now_ms, self.ordering.store());
-        self.last_access_ms
-            .value
-            .store(now_ms, self.ordering.store());
+        self.tokens.0.store(self.max_tokens, self.ordering.store());
+        self.last_refill_ms.0.store(now_ms, self.ordering.store());
+        self.last_access_ms.0.store(now_ms, self.ordering.store());
         self.consecutive_rejections.store(0, self.ordering.store());
         self.max_wait_time_ns.store(0, self.ordering.store());
         self.total_acquired.store(0, self.ordering.store());
@@ -1043,7 +1035,7 @@ impl RateLimiter {
     /// This is the number of tokens added per refill interval.
     #[inline]
     pub fn get_last_access_ms(&self) -> u64 {
-        self.last_access_ms.value.load(Ordering::Relaxed)
+        self.last_access_ms.0.load(Ordering::Relaxed)
     }
 }
 
@@ -1308,7 +1300,7 @@ mod tests {
         let limiter = RateLimiter::new(100, 10);
 
         // Rapid acquisitions should not update last_access every time
-        let start_access = limiter.last_access_ms.value.load(Ordering::Relaxed);
+        let start_access = limiter.last_access_ms.0.load(Ordering::Relaxed);
 
         for _ in 0..50 {
             assert!(limiter.try_acquire());
@@ -1316,7 +1308,7 @@ mod tests {
         }
 
         // last_access should have been updated, but not 50 times
-        let end_access = limiter.last_access_ms.value.load(Ordering::Relaxed);
+        let end_access = limiter.last_access_ms.0.load(Ordering::Relaxed);
         assert!(end_access >= start_access);
     }
 
