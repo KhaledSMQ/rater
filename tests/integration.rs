@@ -163,7 +163,12 @@ fn test_all_memory_orderings_under_contention() {
         }
 
         let total: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
-        assert!(total > 0 && total <= 500, "ordering={:?} total={}", ordering, total);
+        assert!(
+            total > 0 && total <= 500,
+            "ordering={:?} total={}",
+            ordering,
+            total
+        );
 
         let metrics = limiter.metrics();
         assert_eq!(metrics.total_acquired + metrics.total_rejected, 1000);
@@ -328,7 +333,11 @@ fn test_ip_manager_concurrent_same_ip_contention() {
         "Should not exceed max_tokens, but got {}",
         total
     );
-    assert!(total >= 90, "Should acquire most tokens, but only got {}", total);
+    assert!(
+        total >= 90,
+        "Should acquire most tokens, but only got {}",
+        total
+    );
     assert_eq!(manager.active_ips(), 1);
 }
 

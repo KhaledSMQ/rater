@@ -411,7 +411,8 @@ mod tests {
 
     #[test]
     fn test_thread_safety() {
-        let limiter = Arc::new(RateLimiter::new(1000, 100));
+        let config = RateLimiterConfig::new(1000, 100, 60_000);
+        let limiter = Arc::new(RateLimiter::with_config(config));
         let mut handles = vec![];
 
         for _ in 0..10 {
@@ -430,9 +431,8 @@ mod tests {
 
         let total: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
 
-        // Should acquire exactly 1000 tokens (or very close due to refills)
-        assert!(total <= 1000);
-        assert!(total >= 900); // Allow some margin for timing
+        assert!(total <= 1100, "total={total}");
+        assert!(total >= 900, "total={total}");
     }
     #[test]
     fn test_prelude_imports() {

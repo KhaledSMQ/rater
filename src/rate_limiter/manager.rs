@@ -182,7 +182,7 @@ impl IpRateLimiterManager {
             .map(|n| n.get())
             .unwrap_or(8)
             .next_power_of_two()
-            .min(64); // Cap at 64 shards for memory efficiency
+            .clamp(2, 64);
 
         // Pre-size each shard for expected load distribution
         let initial_capacity = (MAX_TRACKED_IPS / num_shards).max(128);
@@ -270,27 +270,29 @@ impl IpRateLimiterManager {
     #[inline]
     pub fn get_limiter(&self, ip: IpAddr) -> Option<Arc<RateLimiter>> {
         // Fast path: check if limiter already exists
-        // This is the common case and avoids any allocation
         if let Some(limiter) = self.limiters.get(&ip) {
             return Some(limiter.clone());
         }
 
-        // Slow path: need to create new limiter
+        // Slow path: create new limiter (cold, outlined)
+        self.get_limiter_slow(ip)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn get_limiter_slow(&self, ip: IpAddr) -> Option<Arc<RateLimiter>> {
         let current = self.active_count.load(Ordering::Acquire);
 
-        // Early rejection if at capacity
         if current >= MAX_TRACKED_IPS {
-            warn!("Rate limiter capacity reached, rejecting IP: {}", ip);
+            debug!("Rate limiter capacity reached, rejecting IP: {}", ip);
             return None;
         }
 
-        // Trigger cleanup if approaching threshold
         if current >= CLEANUP_THRESHOLD {
             self.emergency_cleanup();
 
-            // Re-check after cleanup
             if self.active_count.load(Ordering::Acquire) >= MAX_TRACKED_IPS {
-                warn!(
+                debug!(
                     "Rate limiter capacity reached after cleanup, rejecting IP: {}",
                     ip
                 );
@@ -298,27 +300,19 @@ impl IpRateLimiterManager {
             }
         }
 
-        // Use entry API for atomic insert-or-get
         let entry = self.limiters.entry(ip);
 
         match entry {
-            dashmap::mapref::entry::Entry::Occupied(occupied) => {
-                // Another thread created it while we were checking
-                Some(occupied.get().clone())
-            }
+            dashmap::mapref::entry::Entry::Occupied(occupied) => Some(occupied.get().clone()),
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                // Reserve our slot atomically
                 let prev = self.active_count.fetch_add(1, Ordering::AcqRel);
 
-                // Check for race condition where we exceeded limit
                 if prev >= MAX_TRACKED_IPS {
-                    // Rollback our increment
                     self.active_count.fetch_sub(1, Ordering::AcqRel);
-                    warn!("Rate limiter capacity race detected, rejecting IP: {}", ip);
+                    debug!("Rate limiter capacity race detected, rejecting IP: {}", ip);
                     return None;
                 }
 
-                // Create and insert the new limiter
                 let limiter = Arc::new(RateLimiter::with_config(self.config.clone()));
                 vacant.insert(limiter.clone());
 
@@ -359,7 +353,7 @@ impl IpRateLimiterManager {
             return; // Already below target
         }
 
-        info!("Starting emergency cleanup (current: {} IPs)", before);
+        debug!("Starting emergency cleanup (current: {} IPs)", before);
 
         // Calculate how many entries to remove
         let to_remove_count = before.saturating_sub(CLEANUP_TARGET);
@@ -423,18 +417,17 @@ impl IpRateLimiterManager {
 
         if removed > 0 {
             self.total_cleaned.fetch_add(removed, Ordering::Relaxed);
-            info!(
+            debug!(
                 "Emergency cleanup removed {} limiters (target was {})",
                 removed, to_remove_count
             );
         }
 
-        // Reconcile active_count with actual map size to prevent drift
         let actual_len = self.limiters.len();
         self.active_count.store(actual_len, Ordering::Release);
 
         if actual_len > CLEANUP_TARGET && removed < to_remove_count as u64 {
-            warn!(
+            debug!(
                 "Emergency cleanup incomplete: removed {}/{} entries, current count: {}",
                 removed, to_remove_count, actual_len
             );

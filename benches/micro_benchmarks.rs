@@ -5,11 +5,11 @@
 //! Run with: `cargo bench --bench micro_benchmarks`
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::hint::black_box;
 use rater::{
     cpu_relax, current_time_ms, current_time_ns, current_time_us, MemoryOrdering, RateLimiter,
     RateLimiterConfig,
 };
+use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;

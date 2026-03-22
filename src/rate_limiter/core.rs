@@ -55,30 +55,11 @@ use super::{
     utils::{cpu_relax, current_time_ms, CacheAligned},
 };
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use tracing::{debug, warn};
+use tracing::debug;
 
-/// Maximum number of CAS (Compare-And-Swap) retry attempts.
-///
-/// Prevents infinite spinning under extreme contention. If we can't
-/// acquire tokens after 16 attempts, we give up to avoid blocking.
 const MAX_CAS_RETRIES: usize = 16;
-
-/// Threshold for starting exponential backoff.
-///
-/// After 4 failed CAS attempts, we start backing off exponentially
-/// to reduce contention and give other threads a chance.
 const CAS_BACKOFF_THRESHOLD: usize = 4;
-
-/// Maximum times we can see the same value before using strong CAS.
-///
-/// Helps detect and break out of ABA problem scenarios where values
-/// change and change back, potentially causing issues.
 const MAX_REPEAT_COUNT: usize = 3;
-
-/// Minimum interval between last_access timestamp updates (milliseconds).
-///
-/// We don't update the last access time on every request to reduce
-/// contention on the atomic variable. 100ms granularity is sufficient.
 const LAST_ACCESS_UPDATE_INTERVAL_MS: u64 = 100;
 
 // Platform-specific token counter type selection
@@ -212,48 +193,26 @@ impl TokenOps for AtomicU32 {
 /// }
 /// ```
 pub struct RateLimiter {
-    // Hot path fields - accessed frequently during normal operation
-    // These are cache-aligned to prevent false sharing between CPU cores
-    /// Current number of available tokens (cache-aligned for performance)
+    // === HOT: touched on every try_acquire call ===
     tokens: CacheAligned<TokenCounter>,
 
-    /// Timestamp of last refill in milliseconds (cache-aligned)
+    // === WARM: touched on refill check (most calls), shares no cache line with tokens ===
     last_refill_ms: CacheAligned<AtomicU64>,
 
-    /// Timestamp of last access in milliseconds (cache-aligned)
-    /// Used for cleanup of inactive limiters
+    // === COLD: updated infrequently (throttled to 100ms) ===
     last_access_ms: CacheAligned<AtomicU64>,
 
-    // Backpressure tracking - helps detect when system is under load
-    /// Count of consecutive failed acquisition attempts
-    /// High values indicate the system is under pressure
-    consecutive_rejections: AtomicU32,
-
-    /// Maximum wait time observed in nanoseconds
-    /// Useful for performance monitoring
-    max_wait_time_ns: AtomicU64,
-
-    // Configuration fields (cold path - accessed less frequently)
-    /// Maximum tokens the bucket can hold (burst capacity)
+    // === CONFIG: read-only after construction, can live on same cache line ===
     max_tokens: u64,
-
-    /// Number of tokens to add per refill interval
     refill_rate: u32,
-
-    /// Milliseconds between refill operations
     refill_interval_ms: u64,
-
-    /// Memory ordering strategy for atomic operations
     ordering: MemoryOrdering,
 
-    // Metrics fields (cold path - accessed for monitoring)
-    /// Total number of tokens successfully acquired
+    // === METRICS: cold path, only for monitoring ===
+    consecutive_rejections: AtomicU32,
+    max_wait_time_ns: AtomicU64,
     total_acquired: AtomicU64,
-
-    /// Total number of acquisition attempts that were rejected
     total_rejected: AtomicU64,
-
-    /// Total number of refill operations performed
     total_refills: AtomicU64,
 }
 
@@ -372,73 +331,109 @@ impl RateLimiter {
     /// - `false` if no tokens are available (rate limited)
     #[inline(always)]
     pub fn try_acquire(&self) -> bool {
-        let now_ms = current_time_ms();
-
-        // Optimization: Only update last_access periodically to reduce contention
-        // This atomic variable is used for cleanup detection, not critical path
-        let last = self.last_access_ms.0.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(last) > LAST_ACCESS_UPDATE_INTERVAL_MS {
-            self.last_access_ms.0.store(now_ms, Ordering::Relaxed);
+        // Ultra-fast path: try CAS immediately before any time checks.
+        // In the common case (tokens available, no refill needed), this
+        // completes in a single atomic load + CAS (~5-15ns).
+        let current = self.tokens.0.load(self.ordering.load());
+        if current > 0
+            && self
+                .tokens
+                .0
+                .compare_exchange_weak(current, current - 1, self.ordering.rmw(), Ordering::Relaxed)
+                .is_ok()
+        {
+            self.on_acquisition(1);
+            self.touch_last_access_lazy();
+            return true;
         }
 
-        // Check if refill needed before attempting acquisition
-        // This reduces failed attempts when tokens are depleted
+        // Full path: includes time check, refill, and retry loop
+        self.try_acquire_full()
+    }
+
+    /// Full acquisition path with refill logic and retry loop.
+    /// Separated from the ultra-fast path to keep try_acquire small
+    /// and maximize the chance it gets fully inlined.
+    #[cold]
+    #[inline(never)]
+    fn try_acquire_full(&self) -> bool {
+        let now_ms = current_time_ms();
+
+        self.touch_last_access(now_ms);
+
         let last_refill = self.last_refill_ms.0.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(last_refill) >= self.refill_interval_ms {
+        if now_ms.wrapping_sub(last_refill) >= self.refill_interval_ms {
             self.refill_if_needed(now_ms);
         }
 
-        // Optimized single-token acquisition with bounded retries
         let mut retries = 0;
         loop {
             let current = self.tokens.0.load(self.ordering.load());
 
-            // Fast path: no tokens available
             if current == 0 {
                 self.on_rejection(1);
                 return false;
             }
 
-            // Try to atomically decrement the token count
             match self.tokens.0.compare_exchange_weak(
                 current,
                 current - 1,
                 self.ordering.rmw(),
-                self.ordering.cas_failure(),
+                Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    // Success! We got a token
                     self.on_acquisition(1);
                     return true;
                 }
                 Err(0) => {
-                    // Someone else took the last token
                     self.on_rejection(1);
                     return false;
                 }
                 Err(_) => {
-                    // CAS failed, another thread modified the value
                     retries += 1;
-
-                    // Bounded retries to prevent infinite spinning
                     if retries >= MAX_CAS_RETRIES {
-                        warn!("Single token CAS retry limit reached");
                         self.on_rejection(1);
                         return false;
                     }
-
-                    // Exponential backoff to reduce contention
-                    if retries > CAS_BACKOFF_THRESHOLD {
-                        // Exponential backoff: 2^1, 2^2, ... up to 2^4 iterations
-                        for _ in 0..(1 << (retries - CAS_BACKOFF_THRESHOLD).min(4)) {
-                            cpu_relax();
-                        }
-                    } else {
-                        // Simple CPU pause for short retries
-                        cpu_relax();
-                    }
+                    Self::backoff(retries);
                 }
             }
+        }
+    }
+
+    #[inline(always)]
+    fn touch_last_access_lazy(&self) {
+        // On the ultra-fast path we still need to update last_access
+        // periodically, but we avoid calling current_time_ms() on
+        // every single call. We use the CACHED_TIME_MS global which
+        // is set on every current_time_ms() call (from refill checks
+        // and full-path calls), so it's always reasonably fresh.
+        let cached = super::utils::cached_time_ms();
+        if cached != 0 {
+            let last = self.last_access_ms.0.load(Ordering::Relaxed);
+            if cached.wrapping_sub(last) > LAST_ACCESS_UPDATE_INTERVAL_MS {
+                self.last_access_ms.0.store(cached, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn touch_last_access(&self, now_ms: u64) {
+        let last = self.last_access_ms.0.load(Ordering::Relaxed);
+        if now_ms.wrapping_sub(last) > LAST_ACCESS_UPDATE_INTERVAL_MS {
+            self.last_access_ms.0.store(now_ms, Ordering::Relaxed);
+        }
+    }
+
+    /// Shared backoff logic to avoid code duplication.
+    #[inline(always)]
+    fn backoff(retries: usize) {
+        if retries > CAS_BACKOFF_THRESHOLD {
+            for _ in 0..(1 << (retries - CAS_BACKOFF_THRESHOLD).min(4)) {
+                cpu_relax();
+            }
+        } else {
+            cpu_relax();
         }
     }
 
@@ -492,25 +487,21 @@ impl RateLimiter {
     /// ```
     #[inline]
     pub fn try_acquire_n(&self, n: u64) -> bool {
-        // Fast paths for common cases
         if n == 0 {
-            return true; // Acquiring 0 tokens always succeeds
+            return true;
         }
         if n == 1 {
-            return self.try_acquire(); // Use optimized single-token path
+            return self.try_acquire();
         }
         if n > self.max_tokens {
             self.on_rejection(n);
-            return false; // Can never acquire more than max
+            return false;
         }
 
         let now_ms = current_time_ms();
-        self.last_access_ms.0.store(now_ms, self.ordering.store());
-
-        // Check for refill before attempting acquisition
+        self.touch_last_access(now_ms);
         self.refill_if_needed(now_ms);
 
-        // Track wait time for performance monitoring
         let start_ns = std::time::Instant::now();
         let result = self.try_acquire_with_bounded_cas(n);
 
@@ -528,13 +519,11 @@ impl RateLimiter {
     fn try_acquire_with_bounded_cas(&self, n: u64) -> bool {
         let mut retries = 0;
         let mut last_seen = u64::MAX;
-        let mut repeat_count = 0;
+        let mut repeat_count: usize = 0;
 
         loop {
             let current = self.tokens.0.load(self.ordering.load());
 
-            // ABA problem detection: Check if we're seeing the same value repeatedly
-            // This can indicate that other threads are modifying and restoring the value
             if current == last_seen {
                 repeat_count += 1;
                 if repeat_count >= MAX_REPEAT_COUNT {
@@ -542,12 +531,11 @@ impl RateLimiter {
                         self.on_rejection(n);
                         return false;
                     }
-                    // Use strong CAS to break potential ABA cycle
                     match self.tokens.0.compare_exchange(
                         current,
                         current - n,
                         self.ordering.rmw(),
-                        self.ordering.cas_failure(),
+                        Ordering::Relaxed,
                     ) {
                         Ok(_) => {
                             self.on_acquisition(n);
@@ -564,25 +552,22 @@ impl RateLimiter {
                 repeat_count = 0;
             }
 
-            // Check if enough tokens are available
             if current < n {
                 self.on_rejection(n);
                 return false;
             }
 
-            // Try to atomically acquire the tokens
             match self.tokens.0.compare_exchange_weak(
                 current,
                 current - n,
                 self.ordering.rmw(),
-                self.ordering.cas_failure(),
+                Ordering::Relaxed,
             ) {
                 Ok(_) => {
                     self.on_acquisition(n);
                     return true;
                 }
                 Err(actual) => {
-                    // Early exit if tokens were depleted by other threads
                     if actual < n {
                         self.on_rejection(n);
                         return false;
@@ -591,36 +576,27 @@ impl RateLimiter {
                     retries += 1;
 
                     if retries >= MAX_CAS_RETRIES {
-                        warn!(
-                            "Rate limiter CAS retry limit reached after {} attempts",
-                            retries
-                        );
                         self.on_rejection(n);
                         return false;
                     }
 
-                    // Exponential backoff for high contention scenarios
-                    if retries > CAS_BACKOFF_THRESHOLD {
-                        for _ in 0..(1 << (retries - CAS_BACKOFF_THRESHOLD).min(4)) {
-                            cpu_relax();
-                        }
-                    } else {
-                        cpu_relax();
-                    }
+                    Self::backoff(retries);
                 }
             }
         }
     }
 
-    /// Records successful token acquisition for metrics.
-    #[inline]
+    #[inline(always)]
     fn on_acquisition(&self, _n: u64) {
         self.total_acquired.fetch_add(1, Ordering::Relaxed);
-        self.consecutive_rejections.store(0, Ordering::Relaxed);
+        // Only reset consecutive_rejections if it's non-zero to avoid
+        // a write to a shared cache line on every successful acquire
+        if self.consecutive_rejections.load(Ordering::Relaxed) != 0 {
+            self.consecutive_rejections.store(0, Ordering::Relaxed);
+        }
     }
 
-    /// Records failed token acquisition for metrics and backpressure detection.
-    #[inline]
+    #[inline(always)]
     fn on_rejection(&self, _n: u64) {
         self.total_rejected.fetch_add(1, Ordering::Relaxed);
         self.consecutive_rejections.fetch_add(1, Ordering::Relaxed);
@@ -647,31 +623,35 @@ impl RateLimiter {
     /// ```
     #[inline]
     fn refill_if_needed(&self, now_ms: u64) {
-        let last_refill = self.last_refill_ms.0.load(self.ordering.load());
+        let last_refill = self.last_refill_ms.0.load(Ordering::Relaxed);
 
-        let elapsed = now_ms.saturating_sub(last_refill);
+        let elapsed = now_ms.wrapping_sub(last_refill);
         if elapsed < self.refill_interval_ms {
-            return; // Not time for refill yet
+            return;
         }
 
-        // Calculate how many refill periods have passed
         let periods = (elapsed / self.refill_interval_ms).min(MAX_REFILL_PERIODS);
         if periods == 0 {
             return;
         }
 
-        let new_refill_time = last_refill + (periods * self.refill_interval_ms);
+        let new_refill_time = last_refill.wrapping_add(periods * self.refill_interval_ms);
 
-        // Try to claim the refill operation atomically
-        if self.last_refill_ms.0.compare_exchange(
-            last_refill,
-            new_refill_time,
-            self.ordering.rmw(),
-            self.ordering.cas_failure(),
-        ).is_ok() {
+        // Claim the refill atomically; use Relaxed failure ordering
+        // since we don't need the actual value on failure
+        if self
+            .last_refill_ms
+            .0
+            .compare_exchange(
+                last_refill,
+                new_refill_time,
+                self.ordering.rmw(),
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
             self.perform_refill(periods);
         }
-        // If CAS failed, another thread is handling the refill
     }
 
     /// Performs the actual token refill operation.
@@ -680,15 +660,12 @@ impl RateLimiter {
     /// refill rate when under sustained pressure.
     #[inline]
     fn perform_refill(&self, periods: u64) {
-        // Adaptive refill: reduce rate when under sustained pressure
-        // This helps prevent the system from being overwhelmed
         let refill_rate = if self.is_under_sustained_pressure() {
             self.adaptive_refill_rate()
         } else {
             self.refill_rate
         };
 
-        // Calculate tokens to add (with overflow protection)
         let tokens_to_add = (refill_rate as u64)
             .saturating_mul(periods)
             .min(self.max_tokens);
@@ -697,17 +674,22 @@ impl RateLimiter {
         let mut current = self.tokens.0.load(self.ordering.load());
 
         loop {
-            // Cap at max_tokens to prevent overflow
             let new_tokens = current.saturating_add(tokens_to_add).min(self.max_tokens);
+
+            if new_tokens == current {
+                // Already at max, nothing to do
+                self.total_refills.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
 
             match self.tokens.0.compare_exchange_weak(
                 current,
                 new_tokens,
                 self.ordering.rmw(),
-                self.ordering.cas_failure(),
+                Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    self.total_refills.fetch_add(1, self.ordering.rmw());
+                    self.total_refills.fetch_add(1, Ordering::Relaxed);
                     debug!(
                         "Refilled {} tokens (periods: {})",
                         new_tokens - current,
@@ -720,17 +702,10 @@ impl RateLimiter {
                     retries += 1;
 
                     if retries >= MAX_CAS_RETRIES {
-                        warn!("Rate limiter refill CAS retry limit reached");
                         break;
                     }
 
-                    if retries > CAS_BACKOFF_THRESHOLD {
-                        for _ in 0..(1 << (retries - CAS_BACKOFF_THRESHOLD).min(4)) {
-                            cpu_relax();
-                        }
-                    } else {
-                        cpu_relax();
-                    }
+                    Self::backoff(retries);
                 }
             }
         }
@@ -791,20 +766,12 @@ impl RateLimiter {
         }
     }
 
-    /// Updates the maximum observed wait time for performance monitoring.
     #[inline]
     fn update_max_wait_time(&self, wait_ns: u64) {
-        let mut current = self.max_wait_time_ns.load(self.ordering.load());
-        while wait_ns > current {
-            match self.max_wait_time_ns.compare_exchange_weak(
-                current,
-                wait_ns,
-                self.ordering.rmw(),
-                self.ordering.cas_failure(),
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
+        // Use fetch_max for a single atomic RMW instead of a CAS loop.
+        // This is more efficient on modern CPUs and avoids the retry loop entirely.
+        if wait_ns > self.max_wait_time_ns.load(Ordering::Relaxed) {
+            self.max_wait_time_ns.fetch_max(wait_ns, Ordering::Relaxed);
         }
     }
 
@@ -821,7 +788,7 @@ impl RateLimiter {
     /// let limiter = RateLimiter::new(100, 10);
     /// println!("Available tokens: {}", limiter.available_tokens());
     /// ```
-    #[inline]
+    #[inline(always)]
     pub fn available_tokens(&self) -> u64 {
         self.refill_if_needed(current_time_ms());
         self.tokens.0.load(self.ordering.load())
@@ -848,11 +815,11 @@ impl RateLimiter {
     ///     println!("Limiter has been inactive");
     /// }
     /// ```
-    #[inline]
+    #[inline(always)]
     pub fn is_inactive(&self, inactive_duration_ms: u64) -> bool {
         let now_ms = current_time_ms();
-        let last_ms = self.last_access_ms.0.load(self.ordering.load());
-        now_ms.saturating_sub(last_ms) > inactive_duration_ms
+        let last_ms = self.last_access_ms.0.load(Ordering::Relaxed);
+        now_ms.wrapping_sub(last_ms) > inactive_duration_ms
     }
 
     /// Returns comprehensive metrics about the rate limiter's performance.
@@ -915,11 +882,15 @@ impl RateLimiter {
         loop {
             let new_tokens = current.saturating_add(n).min(self.max_tokens);
 
+            if new_tokens == current {
+                break;
+            }
+
             match self.tokens.0.compare_exchange_weak(
                 current,
                 new_tokens,
                 self.ordering.rmw(),
-                self.ordering.cas_failure(),
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => {
@@ -927,17 +898,10 @@ impl RateLimiter {
                     retries += 1;
 
                     if retries >= MAX_CAS_RETRIES {
-                        debug!("Token add CAS retry limit reached");
                         break;
                     }
 
-                    if retries > CAS_BACKOFF_THRESHOLD {
-                        for _ in 0..(1 << (retries - CAS_BACKOFF_THRESHOLD).min(4)) {
-                            cpu_relax();
-                        }
-                    } else {
-                        cpu_relax();
-                    }
+                    Self::backoff(retries);
                 }
             }
         }

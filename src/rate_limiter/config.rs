@@ -137,8 +137,11 @@ impl MemoryOrdering {
 
     /// Returns the appropriate `Ordering` for compare-and-swap failure cases.
     ///
-    /// Used when a CAS operation fails and we need to read the current value.
+    /// Available for users who build custom logic on top of the limiter.
+    /// The core hot paths use `Ordering::Relaxed` directly for CAS failures
+    /// since the retry loop re-reads the value anyway.
     #[inline(always)]
+    #[allow(dead_code)]
     pub(crate) fn cas_failure(&self) -> Ordering {
         match self {
             Self::Relaxed => Ordering::Relaxed,

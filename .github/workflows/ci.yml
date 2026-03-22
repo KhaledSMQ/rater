@@ -107,8 +107,8 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run benchmarks
-        run: cargo bench --all-features
+      - name: Compile benchmarks
+        run: cargo bench --all-features --no-run
 
   publish-dry-run:
     name: Publish Dry Run

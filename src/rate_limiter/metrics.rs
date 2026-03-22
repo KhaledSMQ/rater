@@ -736,18 +736,28 @@ mod tests {
     fn test_utilization_boundaries() {
         // Full bucket = 0% utilization
         let full = RateLimiterMetrics {
-            total_acquired: 0, total_rejected: 0, total_refills: 0,
-            current_tokens: 100, max_tokens: 100,
-            consecutive_rejections: 0, max_wait_time_ns: 0, pressure_ratio: 0.0,
+            total_acquired: 0,
+            total_rejected: 0,
+            total_refills: 0,
+            current_tokens: 100,
+            max_tokens: 100,
+            consecutive_rejections: 0,
+            max_wait_time_ns: 0,
+            pressure_ratio: 0.0,
         };
         assert_eq!(full.utilization(), 0.0);
         assert_eq!(full.availability_percentage(), 100.0);
 
         // Empty bucket = 100% utilization
         let empty = RateLimiterMetrics {
-            total_acquired: 0, total_rejected: 0, total_refills: 0,
-            current_tokens: 0, max_tokens: 100,
-            consecutive_rejections: 0, max_wait_time_ns: 0, pressure_ratio: 0.0,
+            total_acquired: 0,
+            total_rejected: 0,
+            total_refills: 0,
+            current_tokens: 0,
+            max_tokens: 100,
+            consecutive_rejections: 0,
+            max_wait_time_ns: 0,
+            pressure_ratio: 0.0,
         };
         assert_eq!(empty.utilization(), 1.0);
         assert_eq!(empty.availability_percentage(), 0.0);
@@ -756,9 +766,14 @@ mod tests {
     #[test]
     fn test_metrics_clone() {
         let metrics = RateLimiterMetrics {
-            total_acquired: 42, total_rejected: 13, total_refills: 7,
-            current_tokens: 30, max_tokens: 100,
-            consecutive_rejections: 2, max_wait_time_ns: 500, pressure_ratio: 0.1,
+            total_acquired: 42,
+            total_rejected: 13,
+            total_refills: 7,
+            current_tokens: 30,
+            max_tokens: 100,
+            consecutive_rejections: 2,
+            max_wait_time_ns: 500,
+            pressure_ratio: 0.1,
         };
         let cloned = metrics.clone();
 
@@ -780,15 +795,20 @@ mod tests {
     #[test]
     fn test_summary_contains_all_fields() {
         let metrics = RateLimiterMetrics {
-            total_acquired: 50, total_rejected: 10, total_refills: 3,
-            current_tokens: 40, max_tokens: 100,
-            consecutive_rejections: 1, max_wait_time_ns: 2_000_000, pressure_ratio: 0.1,
+            total_acquired: 50,
+            total_rejected: 10,
+            total_refills: 3,
+            current_tokens: 40,
+            max_tokens: 100,
+            consecutive_rejections: 1,
+            max_wait_time_ns: 2_000_000,
+            pressure_ratio: 0.1,
         };
 
         let summary = metrics.summary();
-        assert!(summary.contains("50"));  // total_acquired
-        assert!(summary.contains("10"));  // total_rejected
-        assert!(summary.contains("3"));   // total_refills
+        assert!(summary.contains("50")); // total_acquired
+        assert!(summary.contains("10")); // total_rejected
+        assert!(summary.contains("3")); // total_refills
         assert!(summary.contains("40/100")); // tokens
         assert!(summary.contains("Consecutive Rejections: 1"));
     }

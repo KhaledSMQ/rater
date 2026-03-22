@@ -24,20 +24,18 @@
 //!     └─ Standard spin loop hints
 //! ```
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-// Architecture-specific cache line sizes
-// These values are critical for preventing false sharing between CPU cores
-
-
 // Monotonic time base to prevent issues when the system clock jumps.
-// We capture the wall-clock epoch in microseconds at process start,
-// then advance using a monotonic Instant to compute 'now'.
-// Microseconds are used as the base unit to avoid u64 overflow
-// (nanosecond epoch overflows u64 around year 2554, but microsecond
-// epoch is safe for ~584,000 years).
+// Microseconds are used as the base unit to avoid u64 overflow.
 static START_TIME_BASE: OnceLock<(Instant, u64)> = OnceLock::new();
+
+// Coarsely cached millisecond timestamp. Updated on every call to
+// current_time_ms(). This avoids redundant Instant::elapsed() calls
+// within the same millisecond (common under high throughput).
+static CACHED_TIME_MS: AtomicU64 = AtomicU64::new(0);
 
 fn init_time_base() -> (Instant, u64) {
     let epoch_us = SystemTime::now()
@@ -46,7 +44,6 @@ fn init_time_base() -> (Instant, u64) {
         .as_micros() as u64;
     (Instant::now(), epoch_us)
 }
-
 
 /// CPU-specific relaxation hint for spin loops.
 ///
@@ -101,7 +98,16 @@ pub fn cpu_relax() {
 #[inline(always)]
 pub fn current_time_ms() -> u64 {
     let (start, base_us) = START_TIME_BASE.get_or_init(init_time_base);
-    (base_us / 1_000).saturating_add(start.elapsed().as_millis() as u64)
+    let now = (base_us / 1_000).wrapping_add(start.elapsed().as_millis() as u64);
+    CACHED_TIME_MS.store(now, Ordering::Relaxed);
+    now
+}
+
+/// Returns the last value written by `current_time_ms()` without
+/// performing a new time measurement. Zero if never called.
+#[inline(always)]
+pub(crate) fn cached_time_ms() -> u64 {
+    CACHED_TIME_MS.load(Ordering::Relaxed)
 }
 
 /// Returns the current time in microseconds since UNIX epoch.
@@ -188,7 +194,6 @@ impl<T> CacheAligned<T> {
     pub(crate) const fn new(value: T) -> Self {
         Self(value)
     }
-
 }
 
 impl<T: Default> Default for CacheAligned<T> {
@@ -208,8 +213,6 @@ impl<T: std::fmt::Debug> std::fmt::Debug for CacheAligned<T> {
         self.0.fmt(f)
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -457,8 +460,8 @@ mod tests {
 
     #[test]
     fn test_concurrent_time_calls() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
 
         let max_ms = Arc::new(AtomicU64::new(0));
         let min_ms = Arc::new(AtomicU64::new(u64::MAX));
@@ -483,8 +486,13 @@ mod tests {
         let max_val = max_ms.load(Ordering::Relaxed);
         let min_val = min_ms.load(Ordering::Relaxed);
 
-        // All concurrent reads should return close values (within 1 second)
-        assert!(max_val - min_val < 1000, "Time spread too large: {}ms", max_val - min_val);
+        // Under Miri / tarpaulin, threads run much slower so allow wider spread
+        let threshold = if cfg!(miri) { 30_000 } else { 1_000 };
+        assert!(
+            max_val - min_val < threshold,
+            "Time spread too large: {}ms",
+            max_val - min_val
+        );
     }
 
     #[test]
