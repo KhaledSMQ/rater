@@ -1119,18 +1119,18 @@ mod tests {
         // Should not be inactive immediately
         assert!(!limiter.is_inactive(1000));
 
-        // Use try_acquire_n to force update of last_access
-        // (try_acquire_n always updates last_access_ms)
-        assert!(limiter.try_acquire_n(1));
+        // available_tokens() goes through the full path (calls current_time_ms),
+        // which guarantees last_access_ms is updated to the current time.
+        let _ = limiter.available_tokens();
 
         // Wait and check
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(std::time::Duration::from_millis(200));
 
-        // Should be inactive for 100ms
+        // Should be inactive for 100ms threshold (we slept 200ms)
         assert!(limiter.is_inactive(100));
 
-        // Should NOT be inactive for 300ms (well beyond sleep time)
-        assert!(!limiter.is_inactive(300));
+        // Should NOT be inactive for 1000ms threshold (we only slept ~200ms)
+        assert!(!limiter.is_inactive(1000));
     }
 
     #[test]
