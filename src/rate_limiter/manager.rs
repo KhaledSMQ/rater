@@ -369,20 +369,15 @@ impl IpRateLimiterManager {
 
         let now = current_time_ms();
 
-        // Collect candidates for removal (LRU-style)
+        // Collect ALL inactive candidates so we can pick the most-idle ones (true LRU).
         let mut candidates: Vec<(u64, IpAddr)> = Vec::with_capacity(to_remove_count.min(1000));
 
-        // First pass: collect inactive entries
         for entry in self.limiters.iter() {
             let last_access = entry.value().get_last_access_ms();
             let idle_time = now.saturating_sub(last_access);
 
             if idle_time >= inactive_threshold {
                 candidates.push((idle_time, *entry.key()));
-
-                if candidates.len() >= to_remove_count {
-                    break;
-                }
             }
         }
 
@@ -390,17 +385,12 @@ impl IpRateLimiterManager {
         if cfg!(test) && candidates.len() < to_remove_count {
             for entry in self.limiters.iter() {
                 if candidates.iter().any(|(_, ip)| ip == entry.key()) {
-                    continue; // Skip already collected
+                    continue;
                 }
 
-                // let last_access = entry.value().last_access_ms.value.load(Ordering::Relaxed);
                 let last_access = entry.value().get_last_access_ms();
                 let idle_time = now.saturating_sub(last_access);
                 candidates.push((idle_time, *entry.key()));
-
-                if candidates.len() >= to_remove_count {
-                    break;
-                }
             }
         }
 
