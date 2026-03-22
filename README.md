@@ -1,40 +1,40 @@
-# Rater 🚀
+# Rater
 
 [![Crates.io](https://img.shields.io/crates/v/rater.svg)](https://crates.io/crates/rater)
 [![Documentation](https://docs.rs/rater/badge.svg)](https://docs.rs/rater)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/khaledsmq/rater/ci.yml?branch=main)](https://github.com/khaledsmq/rater/actions)
 [![MSRV](https://img.shields.io/badge/MSRV-1.70.0-blue)](https://github.com/khaledsmq/rater)
 
-A blazingly fast, lock-free, thread-safe rate limiting library for Rust implementing the token bucket algorithm with optional per-IP rate limiting support.
+A high-performance, lock-free rate limiting library for Rust. It uses the token bucket algorithm under the hood and comes with built-in per-IP rate limiting, so you can drop it into a web server and start throttling requests in minutes.
 
-## ✨ Features
+## Features
 
-- 🔒 **Lock-free Implementation** - Uses atomic operations for thread-safe token management without mutex overhead
-- ⚡ **High Performance** - Cache-aligned structures and platform-specific optimizations (PAUSE on x86, YIELD on ARM)
-- 🔄 **Adaptive Refill** - Automatically adjusts refill rate under sustained pressure
-- 🌐 **Per-IP Rate Limiting** - Built-in IP-based rate limiter management with automatic cleanup
-- 📊 **Comprehensive Metrics** - Real-time performance monitoring and health status tracking
-- 🎯 **Zero Dependencies** - Minimal dependencies (only dashmap for IP management)
-- 🦀 **100% Safe Rust** - Unsafe code only for platform-specific CPU instructions
+- **Lock-free & thread-safe** -- atomic CAS operations instead of mutexes, so threads never block each other
+- **Fast** -- cache-aligned structures, platform-specific hints (PAUSE on x86, YIELD on ARM), ~29 ns per `try_acquire` call
+- **Adaptive refill** -- automatically adjusts refill rate when your system is under sustained pressure
+- **Per-IP rate limiting** -- built-in `IpRateLimiterManager` with automatic cleanup of idle clients
+- **Real-time metrics** -- success rates, pressure detection, health status -- all available at a glance
+- **Lightweight** -- just three dependencies: [dashmap](https://crates.io/crates/dashmap), [ahash](https://crates.io/crates/ahash), and [tracing](https://crates.io/crates/tracing)
+- **Safe Rust** -- `unsafe` is used only for platform-specific CPU pause instructions
 
-## 📦 Installation
+## Installation
 
-Add this to your `Cargo.toml`:
-
-```toml
-[dependencies]
-rater = "0.1.0"
-```
-
-For all features including serialization support:
+Add `rater` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rater = { version = "0.1.0", features = ["full"] }
+rater = "0.1.2"
 ```
 
-## 🚀 Quick Start
+If you also want serde serialization support:
+
+```toml
+[dependencies]
+rater = { version = "0.1.2", features = ["full"] }
+```
+
+## Quick Start
 
 ### Basic Rate Limiting
 
@@ -42,58 +42,61 @@ rater = { version = "0.1.0", features = ["full"] }
 use rater::RateLimiter;
 
 fn main() {
-    // Create a rate limiter with 100 tokens, refilling 10 tokens/second
+    // 100 token capacity, refills 10 tokens every second
     let limiter = RateLimiter::new(100, 10);
 
-    // Try to acquire a single token
     if limiter.try_acquire() {
         println!("Request allowed!");
     } else {
-        println!("Rate limited!");
+        println!("Rate limited -- try again later");
     }
 
-    // Try to acquire multiple tokens at once
+    // Acquire multiple tokens at once (handy for batch/expensive operations)
     if limiter.try_acquire_n(5) {
         println!("Batch request allowed!");
     }
 
-    // Check available tokens
     println!("Available tokens: {}", limiter.available_tokens());
 }
 ```
 
 ### Per-IP Rate Limiting
 
+Perfect for web servers -- each client IP gets its own token bucket:
+
 ```rust
-use rater::IpRateLimiterManager;
+use rater::{IpRateLimiterManager, RateLimiterConfig};
 use std::net::IpAddr;
 use std::sync::Arc;
 
 fn main() {
-    // Create a manager for per-IP rate limiting
-    let config = rater::RateLimiterConfig::per_second(10); // 10 requests per second
+    let config = RateLimiterConfig::per_second(10); // 10 req/s per IP
     let manager = Arc::new(IpRateLimiterManager::new(config));
 
-    // Start automatic cleanup thread
-    let manager_clone = manager.clone();
-    manager_clone.start_cleanup_thread();
+    // Start a background cleanup thread (removes idle IPs automatically)
+    let (handle, stop_tx) = manager.clone().start_stoppable_cleanup_thread();
 
-    // Handle incoming requests
     let client_ip: IpAddr = "192.168.1.100".parse().unwrap();
-    
+
     if manager.try_acquire(client_ip) {
         println!("Request from {} allowed", client_ip);
     } else {
         println!("Request from {} rate limited", client_ip);
     }
 
-    // Get statistics
+    // Check how things are going
     let stats = manager.stats();
     println!("{}", stats.summary());
+
+    // When you're done, shut down the cleanup thread gracefully
+    let _ = stop_tx.send(());
+    let _ = handle.join();
 }
 ```
 
-### Using the Builder Pattern
+### Builder Pattern
+
+For full control over every knob:
 
 ```rust
 use rater::{RateLimiterBuilder, MemoryOrdering};
@@ -106,30 +109,29 @@ fn main() {
         .memory_ordering(MemoryOrdering::AcquireRelease)
         .build();
 
-    // Use the configured limiter
     if limiter.try_acquire() {
         println!("Request processed!");
     }
 }
 ```
 
-## 🔧 Advanced Configuration
+## Advanced Configuration
 
-### Custom Rate Limiting Strategies
+### Rate Limiting Strategies
 
 ```rust
-use rater::RateLimiterConfig;
+use rater::{RateLimiterConfig, MemoryOrdering};
 
-// Per-second rate limiting
+// 100 requests per second (with 2x burst capacity by default)
 let config = RateLimiterConfig::per_second(100);
 
-// Per-minute rate limiting
+// 1,000 requests per minute
 let config = RateLimiterConfig::per_minute(1000);
 
-// Custom configuration with burst capacity
-let config = RateLimiterConfig::new(500, 50, 1000)  // 500 max tokens, 50 refill rate, 1000ms interval
-    .with_burst_multiplier(3)  // Allow bursts up to 3x the normal rate
-    .with_ordering(MemoryOrdering::Sequential);  // Strongest memory ordering
+// Full manual control: 500 max tokens, refill 50 tokens every 1000 ms
+let config = RateLimiterConfig::new(500, 50, 1000)
+    .with_burst_multiplier(3)                   // allow bursts up to 3x the refill rate
+    .with_ordering(MemoryOrdering::Sequential);  // strongest memory ordering
 ```
 
 ### Monitoring and Metrics
@@ -139,22 +141,20 @@ use rater::RateLimiter;
 
 let limiter = RateLimiter::new(100, 10);
 
-// Perform some operations
 for _ in 0..50 {
     limiter.try_acquire();
 }
 
-// Get comprehensive metrics
 let metrics = limiter.metrics();
 println!("Success rate: {:.2}%", metrics.success_rate() * 100.0);
 println!("Current tokens: {}/{}", metrics.current_tokens, metrics.max_tokens);
 println!("Health status: {:?}", metrics.health_status());
-
-// Get a detailed summary
 println!("{}", metrics.summary());
 ```
 
-### IP Manager with Custom Cleanup Settings
+### Custom Cleanup Settings
+
+Control how aggressively idle IP entries are pruned:
 
 ```rust
 use rater::{IpRateLimiterManager, RateLimiterConfig};
@@ -163,137 +163,123 @@ use std::sync::Arc;
 let config = RateLimiterConfig::per_second(10);
 let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
     config,
-    60_000,    // Cleanup every 60 seconds
-    300_000,   // Remove limiters inactive for 5 minutes
+    60_000,    // run cleanup every 60 seconds
+    300_000,   // evict IPs inactive for 5 minutes
 ));
 
-// Start a stoppable cleanup thread
 let (handle, stop_tx) = manager.clone().start_stoppable_cleanup_thread();
 
 // ... use the manager ...
 
-// Stop the cleanup thread when done
+// Shut down gracefully
 stop_tx.send(()).unwrap();
 handle.join().unwrap();
 ```
 
-## 🏎️ Performance
+## Performance
 
-Rater is designed for extreme performance in high-concurrency scenarios:
+Rater is built for high-concurrency scenarios. Here are some highlights from the benchmark suite (Apple M-series, `cargo bench`):
 
-- **Lock-free algorithm** using atomic CAS operations
-- **Cache-aligned structures** to prevent false sharing between CPU cores
-- **Platform-specific optimizations**:
-    - x86_64: Uses PAUSE instruction for efficient spin-waiting
-    - ARM64: Uses YIELD instruction
-- **Bounded CAS retries** to prevent infinite spinning under extreme contention
-- **Adaptive refill** automatically reduces refill rate under sustained pressure
+| Operation | Latency | Throughput |
+|---|---|---|
+| `try_acquire()` (single thread) | ~29 ns | ~35 M ops/s |
+| `try_acquire_n(50)` (single thread) | ~30 ns | ~1.67 G tokens/s |
+| `get_limiter()` (IP lookup) | ~10 ns | — |
+| `try_acquire()` per IP | ~38 ns | — |
+| Concurrent acquire (2 threads) | ~90 µs / 2k ops | ~22 M ops/s |
+| Concurrent acquire (8 threads) | ~1.2 ms / 8k ops | ~6.4 M ops/s |
+| IP manager (8 threads) | ~122 µs / 8k ops | — |
+| Metrics snapshot | ~2.3 ns | — |
 
-### Benchmark
+Design choices that make this fast:
 
+- **Lock-free CAS loops** with bounded retries (no infinite spinning)
+- **Cache-aligned structs** to prevent false sharing across cores
+- **Platform-specific spin hints** (x86 PAUSE / ARM YIELD)
+- **Adaptive refill** that backs off under sustained pressure
+
+Run the benchmarks yourself:
+
+```bash
+cargo bench
 ```
-TODO
-```
 
-*Benchmarks run on AMD Ryzen 9 5900X, 32GB RAM*
-
-## 🏗️ Architecture
+## Architecture
 
 ### Core Components
 
-1. **RateLimiter**: Lock-free token bucket implementation
-    - Atomic token counter with platform-specific sizing (u64 on 64-bit, u32 on 32-bit)
-    - Adaptive refill mechanism
-    - Backpressure detection
+1. **`RateLimiter`** -- the lock-free token bucket
+   - Atomic token counter (u64 on 64-bit, u32 on 32-bit)
+   - Time-based auto-refill with adaptive backoff
+   - Backpressure detection
 
-2. **IpRateLimiterManager**: Per-IP rate limiting
-    - Concurrent hash map for IP tracking
-    - Automatic cleanup of inactive limiters
-    - Emergency cleanup under memory pressure
+2. **`IpRateLimiterManager`** -- per-IP rate limiting
+   - Sharded concurrent hash map ([DashMap](https://crates.io/crates/dashmap)) for IP tracking
+   - Automatic + emergency cleanup when approaching capacity (10k IPs max)
+   - LRU-like eviction of idle entries
 
-3. **Metrics & Monitoring**: Real-time performance tracking
-    - Success/rejection rates
-    - Pressure detection
-    - Health status monitoring
+3. **Metrics** -- real-time health monitoring
+   - Success / rejection rates and counts
+   - Pressure ratio and consecutive-rejection streaks
+   - Health status enum (`Healthy`, `Warning`, `Critical`)
 
-### Memory Ordering Options
+### Memory Ordering
 
-Choose the appropriate memory ordering for your use case:
+Pick the trade-off that fits your use case:
 
-```rust
-use rater::MemoryOrdering;
+| Ordering | When to use |
+|---|---|
+| `Relaxed` | Maximum speed, approximate counts are fine |
+| `AcquireRelease` | **(default)** Good balance of speed and correctness |
+| `Sequential` | Strict ordering required (debugging, auditing) |
 
-// Best performance, minimal guarantees
-MemoryOrdering::Relaxed
+## Use Cases
 
-// Balanced performance and correctness (default)
-MemoryOrdering::AcquireRelease  
+- **API gateways** -- throttle requests per client IP
+- **Microservices** -- backpressure and circuit-breaker patterns
+- **Game servers** -- prevent spam and abuse
+- **IoT gateways** -- control device message rates
+- **Background workers** -- throttle calls to external APIs
 
-// Strongest guarantees, lowest performance
-MemoryOrdering::Sequential
-```
+## Examples
 
-## 📊 Use Cases
+The [`examples/`](examples/) directory has runnable demos:
 
-- **Web Services**: Rate limit API endpoints per client IP
-- **Microservices**: Implement circuit breakers and backpressure
-- **Game Servers**: Prevent spam and DoS attacks
-- **IoT Gateways**: Control device message rates
-- **Proxy Servers**: Implement fair resource allocation
-- **Background Jobs**: Throttle external API calls
-
-## 🔍 Examples
-
-Check out the [examples](examples/) directory for more detailed usage:
-
-- [basic.rs](examples/basic.rs) - Simple rate limiting example
-- [ip_limiting.rs](examples/ip_limiting.rs) - Per-IP rate limiting with monitoring
-
-## 🧪 Testing
-
-Run the test suite:
+- [`basic.rs`](examples/basic.rs) -- simple rate limiting
+- [`ip_limiting.rs`](examples/ip_limiting.rs) -- per-IP rate limiting with monitoring
 
 ```bash
-# Run all tests
-cargo test
-
-# Run with all features
-cargo test --all-features
-
-# Run benchmarks
-cargo bench
+cargo run --example basic
+cargo run --example ip_limiting
 ```
 
-## 📈 Benchmarking
-
-The library includes comprehensive benchmarks:
+## Testing
 
 ```bash
-# Run all benchmarks
-cargo bench
-
-# Run specific benchmark
-cargo bench --bench rate_limiter
+cargo test                # run the full test suite
+cargo test --all-features # include serde tests
+cargo bench               # run benchmarks
 ```
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Feel free to open an issue or submit a PR.
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## 📝 License
-MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+## License
 
-## 🙏 Acknowledgments
+Licensed under either of:
 
-- Inspired by various rate limiting implementations in the Rust ecosystem
-- Thanks to the Rust community for excellent tooling and documentation
+- [MIT license](http://opensource.org/licenses/MIT)
+- [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0)
+
+at your option. See [LICENSE](LICENSE) for details.
 
 ---
 
-Made with ❤️ by [Khaled](https://github.com/khaledsmq)
+Made with care by [Khaled](https://github.com/khaledsmq)
