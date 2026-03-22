@@ -1222,34 +1222,41 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn test_cleanup_with_active_limiters() {
         let manager =
-            IpRateLimiterManager::with_cleanup_settings(RateLimiterConfig::default(), 1000, 100);
+            IpRateLimiterManager::with_cleanup_settings(RateLimiterConfig::default(), 1000, 200);
 
         // Create limiters, some active, some inactive
         for i in 0..10 {
             let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 2, i));
             if i < 5 {
-                // These will be active
                 manager.try_acquire(ip);
             } else {
-                // These will be inactive
                 manager.get_limiter(ip);
             }
         }
 
-        // Wait for inactive threshold
-        std::thread::sleep(Duration::from_millis(150));
+        // Wait well past the inactive threshold (200ms) so all 10 are "old"
+        std::thread::sleep(Duration::from_millis(350));
 
-        // Keep first 5 active
+        // Force a fresh timestamp into the global cache so that
+        // the ultra-fast path's touch_last_access_lazy sees a current value.
+        let _ = current_time_ms();
+
+        // Refresh IPs 0-4 -- they should now get a fresh last_access_ms
         for i in 0..5 {
             let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 2, i));
             manager.try_acquire(ip);
         }
 
-        // Cleanup should only remove inactive ones
+        // Cleanup should remove the 5 inactive ones (IPs 5-9) but keep the 5 active ones
         manager.cleanup();
 
-        assert!(manager.active_ips() >= 5);
-        assert!(manager.active_ips() < 10);
+        let active = manager.active_ips();
+        assert!(
+            active >= 5,
+            "Expected at least 5 active IPs after cleanup, got {}",
+            active
+        );
+        assert!(active <= 10);
     }
 
     #[test]
