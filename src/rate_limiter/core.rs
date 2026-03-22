@@ -413,18 +413,9 @@ impl RateLimiter {
 
     #[inline(always)]
     fn touch_last_access_lazy(&self) {
-        // On the ultra-fast path we still need to update last_access
-        // periodically, but we avoid calling current_time_ms() on
-        // every single call. We use the cached timestamp for a quick
-        // staleness check, then only call current_time_ms() when an
-        // update is actually needed (roughly once per 100ms).
-        let cached = super::utils::cached_time_ms();
-        if cached == 0 {
-            return;
-        }
+        let now = current_time_ms();
         let last = self.last_access_ms.0.load(Ordering::Relaxed);
-        if cached.wrapping_sub(last) > LAST_ACCESS_UPDATE_INTERVAL_MS {
-            let now = current_time_ms();
+        if now.wrapping_sub(last) > LAST_ACCESS_UPDATE_INTERVAL_MS {
             self.last_access_ms.0.store(now, Ordering::Relaxed);
         }
     }

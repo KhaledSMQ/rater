@@ -24,18 +24,12 @@
 //!     └─ Standard spin loop hints
 //! ```
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // Monotonic time base to prevent issues when the system clock jumps.
 // Microseconds are used as the base unit to avoid u64 overflow.
 static START_TIME_BASE: OnceLock<TimeBase> = OnceLock::new();
-
-// Coarsely cached millisecond timestamp. Updated on every call to
-// current_time_ms(). This avoids redundant Instant::elapsed() calls
-// within the same millisecond (common under high throughput).
-static CACHED_TIME_MS: AtomicU64 = AtomicU64::new(0);
 
 struct TimeBase {
     start: Instant,
@@ -108,18 +102,8 @@ pub fn cpu_relax() {
 #[inline(always)]
 pub fn current_time_ms() -> u64 {
     let tb = START_TIME_BASE.get_or_init(init_time_base);
-    let now = tb
-        .base_ms
-        .wrapping_add(tb.start.elapsed().as_millis() as u64);
-    CACHED_TIME_MS.store(now, Ordering::Relaxed);
-    now
-}
-
-/// Returns the last value written by `current_time_ms()` without
-/// performing a new time measurement. Zero if never called.
-#[inline(always)]
-pub(crate) fn cached_time_ms() -> u64 {
-    CACHED_TIME_MS.load(Ordering::Relaxed)
+    tb.base_ms
+        .wrapping_add(tb.start.elapsed().as_millis() as u64)
 }
 
 /// Returns the current time in microseconds since UNIX epoch.

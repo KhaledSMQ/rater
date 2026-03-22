@@ -85,15 +85,13 @@ fn test_sustained_load_scenario() {
     assert_eq!(metrics.total_acquired, total_acquired as u64);
 }
 
-// Replace the test_ip_manager_lifecycle function in integration.rs with this:
-
 #[test]
 #[cfg_attr(miri, ignore)]
 fn test_ip_manager_lifecycle() {
     let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
         RateLimiterConfig::per_second(10),
         1000, // longer cleanup interval so it doesn't interfere
-        100,  // inactive duration
+        200,  // inactive duration
     ));
 
     // Phase 1: Add IPs
@@ -103,23 +101,21 @@ fn test_ip_manager_lifecycle() {
     }
     assert_eq!(manager.active_ips(), 50);
 
-    // Phase 2: Wait for IPs to become inactive
-    thread::sleep(Duration::from_millis(150));
+    // Phase 2: Wait well past inactive threshold so all 50 become "old"
+    thread::sleep(Duration::from_millis(400));
 
-    // Phase 3: Keep some IPs active by using try_acquire_n
+    // Phase 3: Keep some IPs active
     let active_ips = 10;
     for i in 0..active_ips {
         let ip: IpAddr = format!("192.168.1.{}", i).parse().unwrap();
-        // Force update of last_access_ms
-        manager.try_acquire_n(ip, 1);
+        manager.try_acquire(ip);
     }
 
-    // Phase 4: Manually trigger cleanup instead of relying on thread timing
+    // Phase 4: Manually trigger cleanup
     manager.cleanup();
 
     // Check results
     let remaining = manager.active_ips();
-    println!("Remaining IPs after cleanup: {}", remaining);
 
     assert!(
         remaining >= active_ips,
