@@ -230,16 +230,6 @@ pub const MSRV: &str = "1.70.0";
 /// use rater::prelude::*;
 /// ```
 pub mod prelude {
-    //! Common imports for typical rate limiting use cases.
-    //!
-    //! # Example
-    //! ```rust
-    //! use rater::prelude::*;
-    //!
-    //! let limiter = RateLimiter::new(100, 10);
-    //! let config = RateLimiterConfig::per_second(50);
-    //! let status = HealthStatus::Healthy;
-    //! ```
 
     pub use crate::{
         HealthStatus, IpRateLimiterManager, ManagerStats, MemoryOrdering, RateLimiter,
@@ -487,5 +477,89 @@ mod tests {
             .build();
 
         assert_eq!(limiter.available_tokens(), 100);
+    }
+
+    #[test]
+    fn test_builder_try_build_refill_rate_zero() {
+        let result = RateLimiterBuilder::new().refill_rate(0).try_build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_builder_try_build_success() {
+        let result = RateLimiterBuilder::new()
+            .max_tokens(50)
+            .refill_rate(10)
+            .refill_interval_ms(1000)
+            .try_build();
+        assert!(result.is_ok());
+        let limiter = result.unwrap();
+        assert_eq!(limiter.available_tokens(), 50);
+    }
+
+    #[test]
+    fn test_builder_debug() {
+        let builder = RateLimiterBuilder::new();
+        let debug = format!("{:?}", builder);
+        assert!(debug.contains("RateLimiterBuilder"));
+    }
+
+    #[test]
+    fn test_metrics_after_mixed_operations() {
+        let limiter = RateLimiter::new(10, 1);
+
+        // 5 single acquires
+        for _ in 0..5 {
+            assert!(limiter.try_acquire());
+        }
+
+        // 1 bulk acquire of 3
+        assert!(limiter.try_acquire_n(3));
+
+        // 1 failed bulk acquire
+        assert!(!limiter.try_acquire_n(5));
+
+        // 2 remaining single
+        assert!(limiter.try_acquire());
+        assert!(limiter.try_acquire());
+
+        // 1 failed single
+        assert!(!limiter.try_acquire());
+
+        let metrics = limiter.metrics();
+        // Counts attempts: 5 + 1 + 1 + 1 = 8 success, 1 + 1 = 2 fail
+        assert_eq!(metrics.total_acquired, 8);
+        assert_eq!(metrics.total_rejected, 2);
+    }
+
+    #[test]
+    fn test_shared_limiter_across_threads() {
+        let shared: SharedRateLimiter = std::sync::Arc::new(RateLimiter::new(100, 10));
+        let mut handles = vec![];
+
+        for _ in 0..4 {
+            let s = shared.clone();
+            handles.push(thread::spawn(move || {
+                let mut count = 0u32;
+                for _ in 0..50 {
+                    if s.try_acquire() {
+                        count += 1;
+                    }
+                }
+                count
+            }));
+        }
+
+        let total: u32 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        assert!(total > 0 && total <= 100);
+    }
+
+    #[test]
+    fn test_version_is_valid_semver() {
+        let parts: Vec<&str> = VERSION.split('.').collect();
+        assert_eq!(parts.len(), 3, "VERSION should be semver: {}", VERSION);
+        for part in &parts {
+            assert!(part.parse::<u32>().is_ok(), "Invalid semver part: {}", part);
+        }
     }
 }

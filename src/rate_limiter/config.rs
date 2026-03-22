@@ -41,7 +41,7 @@ use std::sync::atomic::Ordering;
 /// This prevents issues when the system has been idle for a long time.
 /// For example, if your app was paused for an hour, we don't want to
 /// suddenly add an hour's worth of tokens - we cap it at 100 periods.
-pub const MAX_REFILL_PERIODS: u64 = 100;
+pub(crate) const MAX_REFILL_PERIODS: u64 = 100;
 
 /// Memory ordering strategy for atomic operations.
 ///
@@ -394,6 +394,10 @@ impl RateLimiterConfig {
             return Err("max_tokens must be greater than 0");
         }
 
+        if self.refill_rate == 0 {
+            return Err("refill_rate must be greater than 0");
+        }
+
         // Platform-specific validation for 32-bit systems
         #[cfg(not(target_pointer_width = "64"))]
         {
@@ -561,5 +565,74 @@ mod tests {
             ordering: MemoryOrdering::default(),
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_refill_rate_zero_validation() {
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 0,
+            refill_interval_ms: 1000,
+            ordering: MemoryOrdering::default(),
+        };
+        assert!(config.validate().is_err());
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "refill_rate must be greater than 0"
+        );
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let original = RateLimiterConfig::per_second(100);
+        let cloned = original.clone();
+
+        assert_eq!(cloned.max_tokens, original.max_tokens);
+        assert_eq!(cloned.refill_rate, original.refill_rate);
+        assert_eq!(cloned.refill_interval_ms, original.refill_interval_ms);
+        assert_eq!(cloned.ordering, original.ordering);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = RateLimiterConfig::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("RateLimiterConfig"));
+        assert!(debug.contains("max_tokens"));
+    }
+
+    #[test]
+    fn test_effective_rate_various_intervals() {
+        // 100 tokens every 500ms = 200/sec
+        let config = RateLimiterConfig::new(200, 100, 500);
+        assert_eq!(config.effective_rate_per_second(), 200.0);
+
+        // 1 token every 100ms = 10/sec
+        let config = RateLimiterConfig::new(10, 1, 100);
+        assert_eq!(config.effective_rate_per_second(), 10.0);
+    }
+
+    #[test]
+    fn test_burst_multiplier_with_per_minute() {
+        let config = RateLimiterConfig::per_minute(60).with_burst_multiplier(3);
+
+        assert_eq!(config.max_tokens, 180); // 60 * 3
+        assert_eq!(config.refill_rate, 60);
+        assert_eq!(config.refill_interval_ms, 60_000);
+    }
+
+    #[test]
+    fn test_valid_config_refill_equals_max() {
+        let config = RateLimiterConfig::new(10, 10, 1000);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_new_constructor() {
+        let config = RateLimiterConfig::new(50, 5, 500);
+        assert_eq!(config.max_tokens, 50);
+        assert_eq!(config.refill_rate, 5);
+        assert_eq!(config.refill_interval_ms, 500);
+        assert_eq!(config.ordering, MemoryOrdering::AcquireRelease);
     }
 }

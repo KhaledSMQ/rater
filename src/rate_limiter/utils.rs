@@ -30,28 +30,23 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 // Architecture-specific cache line sizes
 // These values are critical for preventing false sharing between CPU cores
 
-/// Cache line size for x86_64 processors (Intel/AMD).
-///
-/// Most modern x86_64 CPUs use 64-byte cache lines.
-#[cfg(target_arch = "x86_64")]
-pub const CACHE_LINE_SIZE: usize = 64;
-
-/// Cache line size for ARM64 processors.
-///
-/// Many ARM processors use 128-byte cache lines for better performance.
-#[cfg(target_arch = "aarch64")]
-pub const CACHE_LINE_SIZE: usize = 128;
 
 // Monotonic time base to prevent issues when the system clock jumps.
-// We capture the wall-clock epoch milliseconds at process start,
+// We capture the wall-clock epoch in microseconds at process start,
 // then advance using a monotonic Instant to compute 'now'.
+// Microseconds are used as the base unit to avoid u64 overflow
+// (nanosecond epoch overflows u64 around year 2554, but microsecond
+// epoch is safe for ~584,000 years).
 static START_TIME_BASE: OnceLock<(Instant, u64)> = OnceLock::new();
 
-/// Default cache line size for other architectures.
-///
-/// We assume 64 bytes as a reasonable default.
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-pub const CACHE_LINE_SIZE: usize = 64;
+fn init_time_base() -> (Instant, u64) {
+    let epoch_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+    (Instant::now(), epoch_us)
+}
+
 
 /// CPU-specific relaxation hint for spin loops.
 ///
@@ -62,8 +57,8 @@ pub const CACHE_LINE_SIZE: usize = 64;
 ///
 /// ## Platform Behavior
 ///
-/// - **x86_64**: Uses PAUSE instruction (reduces power, improves performance)
-/// - **ARM64**: Uses YIELD instruction (hints to give up time slice)
+/// - **x86_64**: Compiles to PAUSE instruction (reduces power, improves performance)
+/// - **ARM64**: Compiles to YIELD instruction (hints to give up time slice)
 /// - **Others**: Falls back to standard spin loop hint
 ///
 /// ## Usage in Spin Loops
@@ -87,25 +82,7 @@ pub const CACHE_LINE_SIZE: usize = 64;
 /// ```
 #[inline(always)]
 pub fn cpu_relax() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        #[cfg(any(target_feature = "sse2", target_feature = "sse"))]
-        unsafe {
-            std::arch::x86_64::_mm_pause();
-        }
-        #[cfg(not(any(target_feature = "sse2", target_feature = "sse")))]
-        {
-            std::hint::spin_loop();
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        std::hint::spin_loop();
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        std::hint::spin_loop();
-    }
+    std::hint::spin_loop();
 }
 
 /// Returns the current time in milliseconds since UNIX epoch.
@@ -123,14 +100,8 @@ pub fn cpu_relax() {
 /// ```
 #[inline(always)]
 pub fn current_time_ms() -> u64 {
-    let (start, base_ms) = START_TIME_BASE.get_or_init(|| {
-        let epoch_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        (Instant::now(), epoch_ms)
-    });
-    base_ms.saturating_add(start.elapsed().as_millis() as u64)
+    let (start, base_us) = START_TIME_BASE.get_or_init(init_time_base);
+    (base_us / 1_000).saturating_add(start.elapsed().as_millis() as u64)
 }
 
 /// Returns the current time in microseconds since UNIX epoch.
@@ -149,16 +120,8 @@ pub fn current_time_ms() -> u64 {
 /// ```
 #[inline(always)]
 pub fn current_time_us() -> u64 {
-    let (start, base_ms) = START_TIME_BASE.get_or_init(|| {
-        let epoch_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        (Instant::now(), epoch_ms)
-    });
-    base_ms
-        .saturating_mul(1000)
-        .saturating_add(start.elapsed().as_micros() as u64)
+    let (start, base_us) = START_TIME_BASE.get_or_init(init_time_base);
+    base_us.saturating_add(start.elapsed().as_micros() as u64)
 }
 
 /// Returns the current time in nanoseconds since UNIX epoch.
@@ -178,15 +141,9 @@ pub fn current_time_us() -> u64 {
 /// ```
 #[inline(always)]
 pub fn current_time_ns() -> u64 {
-    let (start, base_ms) = START_TIME_BASE.get_or_init(|| {
-        let epoch_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        (Instant::now(), epoch_ms)
-    });
-    base_ms
-        .saturating_mul(1_000_000)
+    let (start, base_us) = START_TIME_BASE.get_or_init(init_time_base);
+    base_us
+        .saturating_mul(1_000)
         .saturating_add(start.elapsed().as_nanos() as u64)
 }
 
@@ -228,27 +185,10 @@ pub(crate) struct CacheAligned<T>(pub T);
 impl<T> CacheAligned<T> {
     /// Creates a new cache-aligned value.
     #[inline(always)]
-    pub const fn new(value: T) -> Self {
+    pub(crate) const fn new(value: T) -> Self {
         Self(value)
     }
 
-    /// Gets a reference to the inner value.
-    #[inline(always)]
-    pub fn get(&self) -> &T {
-        &self.0
-    }
-
-    /// Gets a mutable reference to the inner value.
-    #[inline(always)]
-    pub fn get_mut(&mut self) -> &mut T {
-        &mut self.0
-    }
-
-    /// Consumes the wrapper and returns the inner value.
-    #[inline(always)]
-    pub fn into_inner(self) -> T {
-        self.0
-    }
 }
 
 impl<T: Default> Default for CacheAligned<T> {
@@ -269,103 +209,70 @@ impl<T: std::fmt::Debug> std::fmt::Debug for CacheAligned<T> {
     }
 }
 
-/// Exponential backoff helper for retry operations.
-///
-/// Implements an exponential backoff strategy to reduce contention
-/// in high-concurrency scenarios. This is more efficient than
-/// constant retrying or sleeping.
-///
-/// ## Backoff Strategy
-///
-/// ```text
-///     Retry attempts and backoff:
-///     
-///     Attempt 1: No wait
-///     Attempt 2: Spin 2 times
-///     Attempt 3: Spin 4 times
-///     Attempt 4: Spin 8 times
-///     Attempt 5+: Yield to scheduler
-/// ```
-///
-#[derive(Debug, Clone)]
-pub(crate) struct Backoff {
-    /// Current backoff step (increases with each retry)
-    step: u32,
-    /// Maximum step before giving up
-    max_step: u32,
-}
 
-impl Backoff {
-    /// Creates a new backoff helper with specified maximum steps.
-    pub fn new(max_step: u32) -> Self {
-        Self { step: 0, max_step }
-    }
-
-    /// Performs backoff with increasing delay.
-    ///
-    /// The delay increases exponentially with each call:
-    /// - Steps 0-3: Spin with cpu_relax() for 2^step iterations
-    /// - Steps 4+: Yield to the OS scheduler
-    #[inline]
-    pub fn backoff(&mut self) {
-        if self.step < 4 {
-            // Exponential spinning: 1, 2, 4, 8 iterations
-            for _ in 0..(1 << self.step) {
-                cpu_relax();
-            }
-        } else {
-            // After 4 attempts, yield to scheduler for longer waits
-            std::thread::yield_now();
-        }
-        self.step = (self.step + 1).min(self.max_step);
-    }
-
-    /// Resets the backoff counter to start over.
-    #[inline]
-    pub fn reset(&mut self) {
-        self.step = 0;
-    }
-
-    /// Checks if we've reached the maximum backoff level.
-    #[inline]
-    pub fn is_at_max(&self) -> bool {
-        self.step >= self.max_step
-    }
-}
-
-/// Helper for likely branch hints (when available).
-///
-/// Hints to the compiler that a branch is likely to be taken.
-/// On stable Rust, this is a no-op, but the compiler's branch
-/// predictor is usually good enough.
-///
-#[inline(always)]
-pub(crate) fn likely(b: bool) -> bool {
-    // On nightly with intrinsics, we could use core::intrinsics::likely
-    // For stable Rust, the compiler's branch predictor handles it
-    b
-}
-
-/// Helper for unlikely branch hints (when available).
-///
-/// Hints to the compiler that a branch is unlikely to be taken.
-/// Useful for error paths and exceptional cases.
-#[inline(always)]
-pub(crate) fn unlikely(b: bool) -> bool {
-    // On nightly with intrinsics, we could use core::intrinsics::unlikely
-    // For stable Rust, the compiler's branch predictor handles it
-    b
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(target_arch = "x86_64")]
+    const CACHE_LINE_SIZE: usize = 64;
+    #[cfg(target_arch = "aarch64")]
+    const CACHE_LINE_SIZE: usize = 128;
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    const CACHE_LINE_SIZE: usize = 64;
+
+    #[derive(Debug, Clone)]
+    struct Backoff {
+        step: u32,
+        max_step: u32,
+    }
+
+    impl Backoff {
+        fn new(max_step: u32) -> Self {
+            Self { step: 0, max_step }
+        }
+
+        fn backoff(&mut self) {
+            if self.step < 4 {
+                for _ in 0..(1 << self.step) {
+                    cpu_relax();
+                }
+            } else {
+                std::thread::yield_now();
+            }
+            self.step = (self.step + 1).min(self.max_step);
+        }
+
+        fn reset(&mut self) {
+            self.step = 0;
+        }
+
+        fn is_at_max(&self) -> bool {
+            self.step >= self.max_step
+        }
+    }
+
+    impl<T> CacheAligned<T> {
+        fn get(&self) -> &T {
+            &self.0
+        }
+
+        fn get_mut(&mut self) -> &mut T {
+            &mut self.0
+        }
+
+        fn into_inner(self) -> T {
+            self.0
+        }
+    }
+
     #[test]
     fn test_cache_line_size() {
-        assert!(CACHE_LINE_SIZE >= 32);
-        assert!(CACHE_LINE_SIZE <= 256);
-        assert!(CACHE_LINE_SIZE.is_power_of_two());
+        let size = CACHE_LINE_SIZE;
+        assert!(size >= 32);
+        assert!(size <= 256);
+        assert!(size.is_power_of_two());
     }
 
     #[test]
@@ -455,15 +362,6 @@ mod tests {
     }
 
     #[test]
-    fn test_likely_unlikely() {
-        // Just ensure they work and return the value
-        assert!(likely(true));
-        assert!(!likely(false));
-        assert!(unlikely(true));
-        assert!(!unlikely(false));
-    }
-
-    #[test]
     fn test_backoff_progression() {
         let mut backoff = Backoff::new(3);
 
@@ -499,5 +397,133 @@ mod tests {
 
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn test_time_no_overflow() {
+        let ms = current_time_ms();
+        let us = current_time_us();
+        let ns = current_time_ns();
+
+        // None should be u64::MAX (overflow sentinel from saturating_mul)
+        assert_ne!(ms, u64::MAX);
+        assert_ne!(us, u64::MAX);
+        assert_ne!(ns, u64::MAX);
+
+        // All should be reasonable epoch values (after year 2020)
+        assert!(ms > 1_577_836_800_000); // 2020-01-01 in ms
+        assert!(us > 1_577_836_800_000_000); // 2020-01-01 in us
+        assert!(ns > 1_577_836_800_000_000_000); // 2020-01-01 in ns
+    }
+
+    #[test]
+    fn test_time_precision_relationships() {
+        let ms = current_time_ms();
+        let us = current_time_us();
+        let ns = current_time_ns();
+
+        // us should be roughly ms * 1000 (within a small delta for elapsed time between calls)
+        let us_from_ms = ms * 1000;
+        assert!(
+            us >= us_from_ms && us < us_from_ms + 10_000,
+            "us={} vs ms*1000={}",
+            us,
+            us_from_ms
+        );
+
+        // ns should be roughly us * 1000
+        let ns_from_us = us * 1000;
+        assert!(
+            ns >= ns_from_us && ns < ns_from_us + 10_000_000,
+            "ns={} vs us*1000={}",
+            ns,
+            ns_from_us
+        );
+    }
+
+    #[test]
+    fn test_time_elapsed_accuracy() {
+        let before_ms = current_time_ms();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let after_ms = current_time_ms();
+
+        let elapsed = after_ms - before_ms;
+        assert!(
+            (40..=100).contains(&elapsed),
+            "Expected ~50ms elapsed, got {}ms",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_concurrent_time_calls() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let max_ms = Arc::new(AtomicU64::new(0));
+        let min_ms = Arc::new(AtomicU64::new(u64::MAX));
+        let mut handles = vec![];
+
+        for _ in 0..8 {
+            let max = max_ms.clone();
+            let min = min_ms.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    let ms = current_time_ms();
+                    max.fetch_max(ms, Ordering::Relaxed);
+                    min.fetch_min(ms, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let max_val = max_ms.load(Ordering::Relaxed);
+        let min_val = min_ms.load(Ordering::Relaxed);
+
+        // All concurrent reads should return close values (within 1 second)
+        assert!(max_val - min_val < 1000, "Time spread too large: {}ms", max_val - min_val);
+    }
+
+    #[test]
+    fn test_cache_aligned_size() {
+        use std::sync::atomic::AtomicU64;
+
+        let size = std::mem::size_of::<CacheAligned<AtomicU64>>();
+        assert!(
+            size >= CACHE_LINE_SIZE,
+            "CacheAligned should be at least {} bytes, got {}",
+            CACHE_LINE_SIZE,
+            size
+        );
+    }
+
+    #[test]
+    fn test_cache_aligned_alignment() {
+        use std::sync::atomic::AtomicU64;
+
+        let align = std::mem::align_of::<CacheAligned<AtomicU64>>();
+        assert!(
+            align >= CACHE_LINE_SIZE,
+            "CacheAligned should have alignment of at least {} bytes, got {}",
+            CACHE_LINE_SIZE,
+            align
+        );
+    }
+
+    #[test]
+    fn test_backoff_yield_phase() {
+        let mut backoff = Backoff::new(10);
+
+        // Go past the spinning phase into yield phase
+        for _ in 0..6 {
+            backoff.backoff();
+        }
+
+        // Should not panic in yield phase
+        backoff.backoff();
+        backoff.backoff();
     }
 }

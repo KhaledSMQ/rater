@@ -61,7 +61,7 @@ mod utils;
 // These are the types that users of the library will interact with
 
 /// Configuration types for customizing rate limiter behavior
-pub use config::{MemoryOrdering, RateLimiterConfig, MAX_REFILL_PERIODS};
+pub use config::{MemoryOrdering, RateLimiterConfig};
 
 /// Core rate limiter implementing the token bucket algorithm
 pub use core::RateLimiter;

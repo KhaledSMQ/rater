@@ -644,4 +644,152 @@ mod tests {
 
         assert_eq!(metrics.total_requests(), 100);
     }
+
+    #[test]
+    fn test_degraded_status() {
+        // Under pressure but not sustained: success < 50% but low consecutive rejections
+        let metrics = RateLimiterMetrics {
+            total_acquired: 30,
+            total_rejected: 70,
+            total_refills: 0,
+            current_tokens: 5,
+            max_tokens: 100,
+            consecutive_rejections: 3,
+            max_wait_time_ns: 0,
+            pressure_ratio: 0.1,
+        };
+
+        assert!(metrics.is_under_pressure());
+        assert!(!metrics.is_under_sustained_pressure());
+        assert_eq!(metrics.health_status(), HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn test_degraded_by_empty_tokens() {
+        // Tokens empty but success rate is still high
+        let metrics = RateLimiterMetrics {
+            total_acquired: 90,
+            total_rejected: 10,
+            total_refills: 5,
+            current_tokens: 0,
+            max_tokens: 100,
+            consecutive_rejections: 2,
+            max_wait_time_ns: 0,
+            pressure_ratio: 0.1,
+        };
+
+        assert!(metrics.is_under_pressure());
+        assert_eq!(metrics.health_status(), HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn test_rejection_rate() {
+        let metrics = RateLimiterMetrics {
+            total_acquired: 60,
+            total_rejected: 40,
+            total_refills: 0,
+            current_tokens: 50,
+            max_tokens: 100,
+            consecutive_rejections: 0,
+            max_wait_time_ns: 0,
+            pressure_ratio: 0.0,
+        };
+
+        assert!((metrics.rejection_rate() - 0.4).abs() < 0.001);
+        assert!((metrics.success_rate() - 0.6).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_sustained_pressure_by_consecutive_rejections() {
+        let metrics = RateLimiterMetrics {
+            total_acquired: 90,
+            total_rejected: 10,
+            total_refills: 0,
+            current_tokens: 0,
+            max_tokens: 100,
+            consecutive_rejections: 15,
+            max_wait_time_ns: 0,
+            pressure_ratio: 0.05,
+        };
+
+        assert!(metrics.is_under_sustained_pressure());
+        assert_eq!(metrics.health_status(), HealthStatus::Critical);
+    }
+
+    #[test]
+    fn test_sustained_pressure_by_pressure_ratio() {
+        let metrics = RateLimiterMetrics {
+            total_acquired: 60,
+            total_rejected: 40,
+            total_refills: 0,
+            current_tokens: 50,
+            max_tokens: 100,
+            consecutive_rejections: 0,
+            max_wait_time_ns: 0,
+            pressure_ratio: 0.4,
+        };
+
+        assert!(metrics.is_under_sustained_pressure());
+    }
+
+    #[test]
+    fn test_utilization_boundaries() {
+        // Full bucket = 0% utilization
+        let full = RateLimiterMetrics {
+            total_acquired: 0, total_rejected: 0, total_refills: 0,
+            current_tokens: 100, max_tokens: 100,
+            consecutive_rejections: 0, max_wait_time_ns: 0, pressure_ratio: 0.0,
+        };
+        assert_eq!(full.utilization(), 0.0);
+        assert_eq!(full.availability_percentage(), 100.0);
+
+        // Empty bucket = 100% utilization
+        let empty = RateLimiterMetrics {
+            total_acquired: 0, total_rejected: 0, total_refills: 0,
+            current_tokens: 0, max_tokens: 100,
+            consecutive_rejections: 0, max_wait_time_ns: 0, pressure_ratio: 0.0,
+        };
+        assert_eq!(empty.utilization(), 1.0);
+        assert_eq!(empty.availability_percentage(), 0.0);
+    }
+
+    #[test]
+    fn test_metrics_clone() {
+        let metrics = RateLimiterMetrics {
+            total_acquired: 42, total_rejected: 13, total_refills: 7,
+            current_tokens: 30, max_tokens: 100,
+            consecutive_rejections: 2, max_wait_time_ns: 500, pressure_ratio: 0.1,
+        };
+        let cloned = metrics.clone();
+
+        assert_eq!(cloned.total_acquired, 42);
+        assert_eq!(cloned.total_rejected, 13);
+        assert_eq!(cloned.current_tokens, 30);
+    }
+
+    #[test]
+    fn test_health_status_clone_eq() {
+        let h1 = HealthStatus::Healthy;
+        let h2 = h1;
+        assert_eq!(h1, h2);
+
+        let h3 = HealthStatus::Critical;
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_summary_contains_all_fields() {
+        let metrics = RateLimiterMetrics {
+            total_acquired: 50, total_rejected: 10, total_refills: 3,
+            current_tokens: 40, max_tokens: 100,
+            consecutive_rejections: 1, max_wait_time_ns: 2_000_000, pressure_ratio: 0.1,
+        };
+
+        let summary = metrics.summary();
+        assert!(summary.contains("50"));  // total_acquired
+        assert!(summary.contains("10"));  // total_rejected
+        assert!(summary.contains("3"));   // total_refills
+        assert!(summary.contains("40/100")); // tokens
+        assert!(summary.contains("Consecutive Rejections: 1"));
+    }
 }

@@ -90,10 +90,10 @@ type TokenCounter = AtomicU64;
 #[cfg(not(target_pointer_width = "64"))]
 type TokenCounter = AtomicU32;
 
-/// Helper trait for unified token operations across platforms.
-///
-/// This trait abstracts the differences between AtomicU64 and AtomicU32,
-/// allowing the same code to work on both 32-bit and 64-bit systems.
+// On 32-bit targets, AtomicU32 lacks a native u64 interface.
+// This trait provides u64-based wrappers with clamping to u32::MAX,
+// so the rest of the code can work uniformly with u64 token counts.
+#[cfg(not(target_pointer_width = "64"))]
 trait TokenOps {
     fn new(val: u64) -> Self;
     fn load(&self, ordering: Ordering) -> u64;
@@ -114,48 +114,6 @@ trait TokenOps {
     ) -> Result<u64, u64>;
 }
 
-// Implementation for 64-bit systems
-#[cfg(target_pointer_width = "64")]
-impl TokenOps for AtomicU64 {
-    #[inline(always)]
-    fn new(val: u64) -> Self {
-        AtomicU64::new(val)
-    }
-
-    #[inline(always)]
-    fn load(&self, ordering: Ordering) -> u64 {
-        self.load(ordering)
-    }
-
-    #[inline(always)]
-    fn store(&self, val: u64, ordering: Ordering) {
-        self.store(val, ordering)
-    }
-
-    #[inline(always)]
-    fn compare_exchange(
-        &self,
-        current: u64,
-        new: u64,
-        success: Ordering,
-        failure: Ordering,
-    ) -> Result<u64, u64> {
-        self.compare_exchange(current, new, success, failure)
-    }
-
-    #[inline(always)]
-    fn compare_exchange_weak(
-        &self,
-        current: u64,
-        new: u64,
-        success: Ordering,
-        failure: Ordering,
-    ) -> Result<u64, u64> {
-        self.compare_exchange_weak(current, new, success, failure)
-    }
-}
-
-// Implementation for 32-bit systems with overflow protection
 #[cfg(not(target_pointer_width = "64"))]
 impl TokenOps for AtomicU32 {
     #[inline(always)]
@@ -253,7 +211,6 @@ impl TokenOps for AtomicU32 {
 ///     }));
 /// }
 /// ```
-#[repr(C)]
 pub struct RateLimiter {
     // Hot path fields - accessed frequently during normal operation
     // These are cache-aligned to prevent false sharing between CPU cores
@@ -454,7 +411,7 @@ impl RateLimiter {
                     self.on_acquisition(1);
                     return true;
                 }
-                Err(actual) if actual == 0 => {
+                Err(0) => {
                     // Someone else took the last token
                     self.on_rejection(1);
                     return false;
@@ -581,18 +538,22 @@ impl RateLimiter {
             if current == last_seen {
                 repeat_count += 1;
                 if repeat_count >= MAX_REPEAT_COUNT {
+                    if current < n {
+                        self.on_rejection(n);
+                        return false;
+                    }
                     // Use strong CAS to break potential ABA cycle
                     match self.tokens.0.compare_exchange(
                         current,
-                        current.saturating_sub(n),
+                        current - n,
                         self.ordering.rmw(),
                         self.ordering.cas_failure(),
                     ) {
-                        Ok(_) if current >= n => {
+                        Ok(_) => {
                             self.on_acquisition(n);
                             return true;
                         }
-                        _ => {
+                        Err(_) => {
                             self.on_rejection(n);
                             return false;
                         }
@@ -653,23 +614,16 @@ impl RateLimiter {
 
     /// Records successful token acquisition for metrics.
     #[inline]
-    fn on_acquisition(&self, n: u64) {
-        self.total_acquired.fetch_add(n, self.ordering.rmw());
-
-        // Reset consecutive rejections counter if it's non-zero
-        // This optimization avoids unnecessary atomic operations
-        let rejections = self.consecutive_rejections.load(Ordering::Relaxed);
-        if rejections > 0 {
-            self.consecutive_rejections.store(0, self.ordering.store());
-        }
+    fn on_acquisition(&self, _n: u64) {
+        self.total_acquired.fetch_add(1, Ordering::Relaxed);
+        self.consecutive_rejections.store(0, Ordering::Relaxed);
     }
 
     /// Records failed token acquisition for metrics and backpressure detection.
     #[inline]
-    fn on_rejection(&self, n: u64) {
-        self.total_rejected.fetch_add(1, self.ordering.rmw());
-        self.consecutive_rejections
-            .fetch_add(1, self.ordering.rmw());
+    fn on_rejection(&self, _n: u64) {
+        self.total_rejected.fetch_add(1, Ordering::Relaxed);
+        self.consecutive_rejections.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Checks if tokens need to be refilled and performs the refill if necessary.
@@ -709,12 +663,12 @@ impl RateLimiter {
         let new_refill_time = last_refill + (periods * self.refill_interval_ms);
 
         // Try to claim the refill operation atomically
-        if let Ok(_) = self.last_refill_ms.0.compare_exchange(
+        if self.last_refill_ms.0.compare_exchange(
             last_refill,
             new_refill_time,
             self.ordering.rmw(),
             self.ordering.cas_failure(),
-        ) {
+        ).is_ok() {
             self.perform_refill(periods);
         }
         // If CAS failed, another thread is handling the refill
@@ -788,7 +742,7 @@ impl RateLimiter {
     /// suggesting that demand consistently exceeds capacity.
     #[inline]
     fn is_under_sustained_pressure(&self) -> bool {
-        self.consecutive_rejections.load(self.ordering.load()) > 10
+        self.consecutive_rejections.load(Ordering::Relaxed) > 10
     }
 
     /// Calculates an adaptive refill rate based on current pressure.
@@ -803,12 +757,19 @@ impl RateLimiter {
     /// - Low pressure: Normal refill rate
     #[inline]
     fn adaptive_refill_rate(&self) -> u32 {
-        let pressure_ratio = self.calculate_pressure_ratio();
+        let total_rejected = self.total_rejected.load(Ordering::Relaxed);
+        let total_acquired = self.total_acquired.load(Ordering::Relaxed);
+        let total = total_acquired + total_rejected;
 
-        if pressure_ratio > 0.5 {
-            (self.refill_rate as f64 * 0.8) as u32
-        } else if pressure_ratio > 0.3 {
-            (self.refill_rate as f64 * 0.9) as u32
+        if total == 0 {
+            return self.refill_rate;
+        }
+
+        // pressure_ratio > 0.5 means rejected * 2 > total
+        if total_rejected * 2 > total {
+            self.refill_rate * 4 / 5
+        } else if total_rejected * 10 > total * 3 {
+            self.refill_rate * 9 / 10
         } else {
             self.refill_rate
         }
@@ -819,8 +780,8 @@ impl RateLimiter {
     /// This metric helps identify when the system is under load.
     #[inline]
     fn calculate_pressure_ratio(&self) -> f64 {
-        let total_rejected = self.total_rejected.load(self.ordering.load());
-        let total_acquired = self.total_acquired.load(self.ordering.load());
+        let total_rejected = self.total_rejected.load(Ordering::Relaxed);
+        let total_acquired = self.total_acquired.load(Ordering::Relaxed);
         let total = total_acquired + total_rejected;
 
         if total == 0 {
@@ -911,16 +872,14 @@ impl RateLimiter {
     /// println!("Current tokens: {}/{}", metrics.current_tokens, metrics.max_tokens);
     /// ```
     pub fn metrics(&self) -> RateLimiterMetrics {
-        // Use consistent ordering for all reads to get a coherent snapshot
-        let ordering = self.ordering.load();
         RateLimiterMetrics {
-            total_acquired: self.total_acquired.load(ordering),
-            total_rejected: self.total_rejected.load(ordering),
-            total_refills: self.total_refills.load(ordering),
-            current_tokens: self.tokens.0.load(ordering),
+            total_acquired: self.total_acquired.load(Ordering::Relaxed),
+            total_rejected: self.total_rejected.load(Ordering::Relaxed),
+            total_refills: self.total_refills.load(Ordering::Relaxed),
+            current_tokens: self.tokens.0.load(Ordering::Relaxed),
             max_tokens: self.max_tokens,
-            consecutive_rejections: self.consecutive_rejections.load(ordering),
-            max_wait_time_ns: self.max_wait_time_ns.load(ordering),
+            consecutive_rejections: self.consecutive_rejections.load(Ordering::Relaxed),
+            max_wait_time_ns: self.max_wait_time_ns.load(Ordering::Relaxed),
             pressure_ratio: self.calculate_pressure_ratio(),
         }
     }
@@ -1030,9 +989,9 @@ impl RateLimiter {
         self.max_tokens
     }
 
-    /// Returns the current refill rate.
+    /// Returns the last access timestamp in milliseconds since UNIX epoch.
     ///
-    /// This is the number of tokens added per refill interval.
+    /// Used for cleanup detection of inactive rate limiters.
     #[inline]
     pub fn get_last_access_ms(&self) -> u64 {
         self.last_access_ms.0.load(Ordering::Relaxed)
@@ -1333,5 +1292,243 @@ mod tests {
         assert!(debug_str.contains("RateLimiter"));
         assert!(debug_str.contains("max_tokens: 10"));
         assert!(debug_str.contains("refill_rate: 5"));
+    }
+
+    #[test]
+    fn test_aba_fix_no_silent_drain() {
+        let limiter = RateLimiter::new(3, 1);
+
+        // Acquire 2, leaving 1 token
+        assert!(limiter.try_acquire_n(2));
+
+        // Requesting 3 should fail and NOT drain the remaining token
+        assert!(!limiter.try_acquire_n(3));
+
+        // The single remaining token should still be available
+        assert_eq!(limiter.available_tokens(), 1);
+        assert!(limiter.try_acquire());
+
+        let metrics = limiter.metrics();
+        assert_eq!(metrics.total_acquired, 2); // 2 attempts succeeded (try_acquire_n(2) + try_acquire())
+        assert_eq!(metrics.total_rejected, 1); // 1 attempt failed (try_acquire_n(3))
+    }
+
+    #[test]
+    fn test_metrics_count_attempts_not_tokens() {
+        let limiter = RateLimiter::new(100, 10);
+
+        assert!(limiter.try_acquire_n(50));
+        assert!(limiter.try_acquire_n(30));
+        assert!(limiter.try_acquire());
+
+        let metrics = limiter.metrics();
+        // Each call is 1 attempt regardless of tokens requested
+        assert_eq!(metrics.total_acquired, 3);
+    }
+
+    #[test]
+    fn test_rejection_resets_consecutive_on_acquire() {
+        let limiter = RateLimiter::new(5, 1);
+
+        // Drain all tokens
+        for _ in 0..5 {
+            limiter.try_acquire();
+        }
+
+        // Accumulate rejections
+        for _ in 0..8 {
+            assert!(!limiter.try_acquire());
+        }
+        assert!(limiter.metrics().consecutive_rejections >= 8);
+
+        // Wait for refill and acquire
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(limiter.try_acquire());
+
+        // Consecutive rejections should be reset to 0
+        assert_eq!(limiter.metrics().consecutive_rejections, 0);
+    }
+
+    #[test]
+    fn test_relaxed_ordering_mode() {
+        let config = RateLimiterConfig {
+            max_tokens: 20,
+            refill_rate: 5,
+            refill_interval_ms: 1000,
+            ordering: MemoryOrdering::Relaxed,
+        };
+        let limiter = RateLimiter::with_config(config);
+
+        for _ in 0..20 {
+            assert!(limiter.try_acquire());
+        }
+        assert!(!limiter.try_acquire());
+
+        let metrics = limiter.metrics();
+        assert_eq!(metrics.total_acquired, 20);
+        assert_eq!(metrics.total_rejected, 1);
+    }
+
+    #[test]
+    fn test_sequential_ordering_mode() {
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 5,
+            refill_interval_ms: 1000,
+            ordering: MemoryOrdering::Sequential,
+        };
+        let limiter = RateLimiter::with_config(config);
+
+        for _ in 0..10 {
+            assert!(limiter.try_acquire());
+        }
+        assert!(!limiter.try_acquire());
+    }
+
+    #[test]
+    fn test_concurrent_single_and_multi_acquire() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let limiter = Arc::new(RateLimiter::new(500, 10));
+        let mut handles = vec![];
+
+        // Half threads use try_acquire, half use try_acquire_n
+        for i in 0..20 {
+            let l = limiter.clone();
+            handles.push(thread::spawn(move || {
+                let mut acquired = 0u64;
+                for _ in 0..50 {
+                    if i % 2 == 0 {
+                        if l.try_acquire() {
+                            acquired += 1;
+                        }
+                    } else if l.try_acquire_n(2) {
+                        acquired += 1;
+                    }
+                }
+                acquired
+            }));
+        }
+
+        let total: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+
+        let metrics = limiter.metrics();
+        assert_eq!(metrics.total_acquired, total);
+        // Total requests = acquired + rejected
+        assert_eq!(metrics.total_requests(), 20 * 50);
+    }
+
+    #[test]
+    fn test_get_max_tokens() {
+        let limiter = RateLimiter::new(42, 5);
+        assert_eq!(limiter.get_max_tokens(), 42);
+    }
+
+    #[test]
+    fn test_get_last_access_ms_updates() {
+        let limiter = RateLimiter::new(100, 10);
+        let before = limiter.get_last_access_ms();
+
+        // try_acquire_n always updates last_access
+        assert!(limiter.try_acquire_n(1));
+
+        let after = limiter.get_last_access_ms();
+        assert!(after >= before);
+    }
+
+    #[test]
+    fn test_add_tokens_when_empty() {
+        let limiter = RateLimiter::new(10, 1);
+
+        // Drain all
+        for _ in 0..10 {
+            limiter.try_acquire();
+        }
+        assert_eq!(limiter.available_tokens(), 0);
+
+        limiter.add_tokens(5);
+        assert_eq!(limiter.available_tokens(), 5);
+    }
+
+    #[test]
+    fn test_add_tokens_zero() {
+        let limiter = RateLimiter::new(10, 1);
+        let before = limiter.available_tokens();
+        limiter.add_tokens(0);
+        assert_eq!(limiter.available_tokens(), before);
+    }
+
+    #[test]
+    fn test_pressure_ratio_calculation() {
+        let limiter = RateLimiter::new(5, 1);
+
+        // 5 acquired, 5 rejected => 50% pressure
+        for _ in 0..5 {
+            limiter.try_acquire();
+        }
+        for _ in 0..5 {
+            limiter.try_acquire();
+        }
+
+        let metrics = limiter.metrics();
+        let ratio = metrics.pressure_ratio;
+        assert!(ratio > 0.4 && ratio < 0.6, "Expected ~0.5, got {}", ratio);
+    }
+
+    #[test]
+    fn test_refill_caps_at_max() {
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 10,
+            refill_interval_ms: 50,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
+
+        // Drain 5
+        for _ in 0..5 {
+            limiter.try_acquire();
+        }
+
+        // Wait for multiple refill periods
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Should cap at max_tokens, not exceed it
+        assert_eq!(limiter.available_tokens(), 10);
+    }
+
+    #[test]
+    fn test_reset_clears_all_state() {
+        let limiter = RateLimiter::new(10, 5);
+
+        for _ in 0..10 {
+            limiter.try_acquire();
+        }
+        for _ in 0..5 {
+            limiter.try_acquire();
+        }
+
+        limiter.reset();
+
+        assert_eq!(limiter.available_tokens(), 10);
+        let m = limiter.metrics();
+        assert_eq!(m.total_acquired, 0);
+        assert_eq!(m.total_rejected, 0);
+        assert_eq!(m.total_refills, 0);
+        assert_eq!(m.consecutive_rejections, 0);
+        assert_eq!(m.max_wait_time_ns, 0);
+    }
+
+    #[test]
+    fn test_try_acquire_n_exactly_max() {
+        let limiter = RateLimiter::new(10, 1);
+
+        // Acquiring exactly max should succeed
+        assert!(limiter.try_acquire_n(10));
+        assert_eq!(limiter.available_tokens(), 0);
+
+        // Now nothing left
+        assert!(!limiter.try_acquire());
     }
 }

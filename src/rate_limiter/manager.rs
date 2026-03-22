@@ -115,8 +115,8 @@ const EMERGENCY_CLEANUP_MIN_INACTIVE_MS: u64 = 1000;
 ///     300_000, // Remove IPs inactive for 5 minutes
 /// ));
 ///
-/// // Start automatic cleanup thread
-/// let cleanup_handle = manager.clone().start_cleanup_thread();
+/// // Start automatic cleanup thread (stoppable)
+/// let (cleanup_handle, stop_tx) = manager.clone().start_stoppable_cleanup_thread();
 /// ```
 ///
 /// ## Memory Management
@@ -429,12 +429,14 @@ impl IpRateLimiterManager {
             );
         }
 
-        // Verify we reached the target
-        let after = self.active_count.load(Ordering::Acquire);
-        if after > CLEANUP_TARGET && removed < to_remove_count as u64 {
+        // Reconcile active_count with actual map size to prevent drift
+        let actual_len = self.limiters.len();
+        self.active_count.store(actual_len, Ordering::Release);
+
+        if actual_len > CLEANUP_TARGET && removed < to_remove_count as u64 {
             warn!(
                 "Emergency cleanup incomplete: removed {}/{} entries, current count: {}",
-                removed, to_remove_count, after
+                removed, to_remove_count, actual_len
             );
         }
     }
@@ -471,6 +473,11 @@ impl IpRateLimiterManager {
     /// ```
     #[inline(always)]
     pub fn try_acquire(&self, ip: IpAddr) -> bool {
+        // Fast path: use DashMap::get to avoid Arc refcount overhead
+        if let Some(entry) = self.limiters.get(&ip) {
+            return entry.value().try_acquire();
+        }
+        // Slow path: create new limiter then acquire
         match self.get_limiter(ip) {
             Some(limiter) => limiter.try_acquire(),
             None => false,
@@ -492,6 +499,11 @@ impl IpRateLimiterManager {
     /// - `false` if insufficient tokens or at capacity
     #[inline]
     pub fn try_acquire_n(&self, ip: IpAddr, n: u64) -> bool {
+        // Fast path: use DashMap::get to avoid Arc refcount overhead
+        if let Some(entry) = self.limiters.get(&ip) {
+            return entry.value().try_acquire_n(n);
+        }
+        // Slow path: create new limiter then acquire
         match self.get_limiter(ip) {
             Some(limiter) => limiter.try_acquire_n(n),
             None => false,
@@ -509,31 +521,37 @@ impl IpRateLimiterManager {
     /// - High usage mode: More aggressive cleanup (half the duration)
     /// - Also shrinks the internal map if significantly oversized
     pub fn cleanup(&self) {
-        // Skip if emergency cleanup is already running
-        if self.cleanup_in_progress.load(Ordering::Acquire) {
+        // Prevent concurrent cleanup with emergency_cleanup
+        if self
+            .cleanup_in_progress
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             return;
         }
+
+        let _guard = CleanupGuard {
+            flag: &self.cleanup_in_progress,
+        };
 
         let before = self.active_count.load(Ordering::Acquire);
 
         // Adjust threshold based on current usage
         let threshold = if before > CLEANUP_THRESHOLD {
-            self.inactive_duration_ms / 2 // More aggressive when near capacity
+            self.inactive_duration_ms / 2
         } else {
             self.inactive_duration_ms
         };
 
-        let mut removed = 0;
+        let mut removed = 0u64;
 
-        // Remove inactive entries
         self.limiters.retain(|ip, limiter| {
             if !limiter.is_inactive(threshold) {
-                true // Keep active limiters
+                true
             } else {
                 debug!("Removing inactive limiter for IP: {}", ip);
                 removed += 1;
-                self.active_count.fetch_sub(1, Ordering::AcqRel);
-                false // Remove inactive limiter
+                false
             }
         });
 
@@ -542,7 +560,10 @@ impl IpRateLimiterManager {
             debug!("Cleanup removed {} inactive limiters", removed);
         }
 
-        // Shrink the map if it has significant overcapacity
+        // Reconcile active_count with actual map size to prevent drift
+        let actual_len = self.limiters.len();
+        self.active_count.store(actual_len, Ordering::Release);
+
         self.shrink_to_fit();
     }
 
@@ -550,7 +571,7 @@ impl IpRateLimiterManager {
     ///
     /// This helps reduce memory usage after many IPs have been removed.
     pub fn shrink_to_fit(&self) {
-        let current_size = self.active_count.load(Ordering::Acquire);
+        let current_size = self.limiters.len();
         let capacity = self.limiters.capacity();
 
         // Shrink if capacity is more than 4x the current size
@@ -598,6 +619,8 @@ impl IpRateLimiterManager {
     /// Starts an automatic cleanup thread.
     ///
     /// The thread runs indefinitely, performing cleanup at regular intervals.
+    /// **Note:** This thread cannot be stopped. Prefer [`start_stoppable_cleanup_thread`](Self::start_stoppable_cleanup_thread)
+    /// for graceful shutdown support.
     ///
     /// # Returns
     ///
@@ -616,6 +639,10 @@ impl IpRateLimiterManager {
     /// // The cleanup thread is now running in the background
     /// // It will run until the program exits
     /// ```
+    #[deprecated(
+        since = "0.1.2",
+        note = "Use start_stoppable_cleanup_thread() instead for graceful shutdown support"
+    )]
     pub fn start_cleanup_thread(self: Arc<Self>) -> thread::JoinHandle<()> {
         let manager = self.clone();
 
@@ -1083,6 +1110,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_cleanup_thread() {
         let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
             RateLimiterConfig::default(),
@@ -1278,5 +1306,282 @@ mod tests {
         } // Guard drops here
 
         assert!(!flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_active_count_reconciliation_after_cleanup() {
+        let manager = IpRateLimiterManager::with_cleanup_settings(
+            RateLimiterConfig::default(),
+            1000,
+            50, // short inactive duration
+        );
+
+        for i in 0..20 {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 10, 0, i));
+            manager.get_limiter(ip);
+        }
+
+        assert_eq!(manager.active_ips(), 20);
+
+        // Wait for inactive threshold
+        thread::sleep(Duration::from_millis(100));
+
+        manager.cleanup();
+
+        // active_count should match actual map length
+        let active = manager.active_ips();
+        let actual_len = manager.limiters.len();
+        assert_eq!(active, actual_len);
+    }
+
+    #[test]
+    fn test_fast_path_try_acquire_existing_ip() {
+        let manager = IpRateLimiterManager::new(RateLimiterConfig {
+            max_tokens: 100,
+            refill_rate: 10,
+            refill_interval_ms: 1000,
+            ordering: MemoryOrdering::AcquireRelease,
+        });
+
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        // First call creates the limiter
+        assert!(manager.try_acquire(ip));
+        assert_eq!(manager.active_ips(), 1);
+
+        // Subsequent calls hit fast path (DashMap::get directly)
+        for _ in 0..50 {
+            manager.try_acquire(ip);
+        }
+
+        // Should still only have 1 IP
+        assert_eq!(manager.active_ips(), 1);
+    }
+
+    #[test]
+    fn test_fast_path_try_acquire_n_existing_ip() {
+        let manager = IpRateLimiterManager::new(RateLimiterConfig {
+            max_tokens: 100,
+            refill_rate: 10,
+            refill_interval_ms: 1000,
+            ordering: MemoryOrdering::AcquireRelease,
+        });
+
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        // Create limiter
+        assert!(manager.try_acquire_n(ip, 5));
+
+        // Fast path for subsequent calls
+        assert!(manager.try_acquire_n(ip, 10));
+        assert!(manager.try_acquire_n(ip, 20));
+
+        assert_eq!(manager.active_ips(), 1);
+    }
+
+    #[test]
+    fn test_ipv6_support() {
+        let manager = IpRateLimiterManager::new(RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 1,
+            refill_interval_ms: 1000,
+            ordering: MemoryOrdering::AcquireRelease,
+        });
+
+        let ipv4: IpAddr = "192.168.1.1".parse().unwrap();
+        let ipv6: IpAddr = "::1".parse().unwrap();
+        let ipv6_full: IpAddr = "2001:db8::1".parse().unwrap();
+
+        // All types should work independently
+        for _ in 0..10 {
+            assert!(manager.try_acquire(ipv4));
+            assert!(manager.try_acquire(ipv6));
+            assert!(manager.try_acquire(ipv6_full));
+        }
+
+        // All should be exhausted
+        assert!(!manager.try_acquire(ipv4));
+        assert!(!manager.try_acquire(ipv6));
+        assert!(!manager.try_acquire(ipv6_full));
+
+        assert_eq!(manager.active_ips(), 3);
+    }
+
+    #[test]
+    fn test_concurrent_cleanup_and_acquire() {
+        let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
+            RateLimiterConfig {
+                max_tokens: 100,
+                refill_rate: 10,
+                refill_interval_ms: 1000,
+                ordering: MemoryOrdering::AcquireRelease,
+            },
+            50,  // fast cleanup interval
+            100, // short inactive duration
+        ));
+
+        // Pre-populate
+        for i in 0..50u8 {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 10, 0, i));
+            manager.get_limiter(ip);
+        }
+
+        let mut handles = vec![];
+
+        // Threads doing acquire
+        for t in 0..5 {
+            let m = manager.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..20 {
+                    let ip = IpAddr::V4(Ipv4Addr::new(20, t, 0, i));
+                    m.try_acquire(ip);
+                }
+            }));
+        }
+
+        // Threads doing cleanup
+        for _ in 0..3 {
+            let m = manager.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..5 {
+                    m.cleanup();
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // active_count should be consistent
+        let active = manager.active_ips();
+        let actual = manager.limiters.len();
+        assert_eq!(active, actual);
+    }
+
+    #[test]
+    fn test_debug_impl() {
+        let manager = IpRateLimiterManager::with_cleanup_settings(
+            RateLimiterConfig::default(),
+            30_000,
+            120_000,
+        );
+        let debug = format!("{:?}", manager);
+        assert!(debug.contains("IpRateLimiterManager"));
+        assert!(debug.contains("cleanup_interval_ms"));
+        assert!(debug.contains("inactive_duration_ms"));
+    }
+
+    #[test]
+    fn test_manager_stats_display() {
+        let manager = IpRateLimiterManager::new(RateLimiterConfig::default());
+        let stats = manager.stats();
+        let display = format!("{}", stats);
+        assert!(display.contains("IP Rate Limiter Manager Stats"));
+        assert!(display.contains("Active IPs"));
+    }
+
+    #[test]
+    fn test_cleanup_ratio() {
+        let stats = ManagerStats {
+            active_ips: 5,
+            total_created: 100,
+            total_cleaned: 95,
+            capacity_used: 0.05,
+            max_capacity: MAX_TRACKED_IPS,
+        };
+
+        assert!((stats.cleanup_ratio() - 0.95).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cleanup_ratio_zero_created() {
+        let stats = ManagerStats {
+            active_ips: 0,
+            total_created: 0,
+            total_cleaned: 0,
+            capacity_used: 0.0,
+            max_capacity: MAX_TRACKED_IPS,
+        };
+
+        assert_eq!(stats.cleanup_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_manager_try_acquire_at_capacity_returns_false() {
+        let manager = IpRateLimiterManager::new(RateLimiterConfig::default());
+
+        // Simulate capacity reached
+        manager
+            .active_count
+            .store(MAX_TRACKED_IPS, Ordering::Release);
+
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        assert!(!manager.try_acquire(ip));
+        assert!(!manager.try_acquire_n(ip, 5));
+
+        manager.active_count.store(0, Ordering::Release);
+    }
+
+    #[test]
+    fn test_get_limiter_returns_same_limiter() {
+        let manager = IpRateLimiterManager::new(RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 1,
+            refill_interval_ms: 1000,
+            ordering: MemoryOrdering::AcquireRelease,
+        });
+
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        let limiter1 = manager.get_limiter(ip).unwrap();
+        let limiter2 = manager.get_limiter(ip).unwrap();
+
+        // Acquire via limiter1 should be visible through limiter2
+        assert!(limiter1.try_acquire());
+        // Both point to the same rate limiter
+        assert_eq!(limiter1.available_tokens(), limiter2.available_tokens());
+    }
+
+    #[test]
+    fn test_clear_then_reuse() {
+        let manager = IpRateLimiterManager::new(RateLimiterConfig {
+            max_tokens: 5,
+            refill_rate: 1,
+            refill_interval_ms: 1000,
+            ordering: MemoryOrdering::AcquireRelease,
+        });
+
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        // Use all tokens
+        for _ in 0..5 {
+            manager.try_acquire(ip);
+        }
+        assert!(!manager.try_acquire(ip));
+
+        // Clear and reuse
+        manager.clear();
+        assert_eq!(manager.active_ips(), 0);
+
+        // Should get a fresh limiter with full tokens
+        assert!(manager.try_acquire(ip));
+        assert_eq!(manager.active_ips(), 1);
+    }
+
+    #[test]
+    fn test_stoppable_thread_stops_on_sender_drop() {
+        let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
+            RateLimiterConfig::default(),
+            50,
+            50,
+        ));
+
+        let (handle, stop_tx) = manager.clone().start_stoppable_cleanup_thread();
+
+        // Dropping sender should also stop the thread (Disconnected branch)
+        drop(stop_tx);
+        handle.join().unwrap();
     }
 }
