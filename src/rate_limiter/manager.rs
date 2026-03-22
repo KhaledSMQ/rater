@@ -1243,10 +1243,6 @@ mod tests {
         // Wait well past the inactive threshold (200ms) so all 10 are "old"
         std::thread::sleep(Duration::from_millis(350));
 
-        // Force a fresh timestamp into the global cache so that
-        // the ultra-fast path's touch_last_access_lazy sees a current value.
-        let _ = current_time_ms();
-
         // Refresh IPs 0-4 -- they should now get a fresh last_access_ms
         for i in 0..5 {
             let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 2, i));
