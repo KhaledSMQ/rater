@@ -1121,13 +1121,19 @@ mod tests {
         let manager_clone = manager.clone();
         let handle = manager_clone.start_cleanup_thread();
 
-        // Wait for cleanup to run
-        std::thread::sleep(Duration::from_millis(200));
+        // Wait long enough for cleanup to run on slow CI runners.
+        // The cleanup thread sleeps for cleanup_interval_ms (100ms) between
+        // iterations, and entries need to be inactive for 50ms, so we need
+        // at least ~150ms. Use 500ms for margin on slow macOS CI VMs.
+        std::thread::sleep(Duration::from_millis(500));
 
         // Should have cleaned up inactive entries
-        assert!(manager.active_ips() < 10);
+        assert!(
+            manager.active_ips() < 10,
+            "Expected cleanup to remove some IPs, but active_ips is still {}",
+            manager.active_ips()
+        );
 
-        // Thread continues running (we can't easily test join without stopping it)
         drop(handle);
     }
 
@@ -1149,8 +1155,8 @@ mod tests {
         // Start stoppable thread
         let (handle, stop_tx) = manager.clone().start_stoppable_cleanup_thread();
 
-        // Let it run
-        std::thread::sleep(Duration::from_millis(150));
+        // Let it run long enough for at least one cleanup cycle on slow CI
+        std::thread::sleep(Duration::from_millis(500));
 
         // Stop it
         stop_tx.send(()).unwrap();
