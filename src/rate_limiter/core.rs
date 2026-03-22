@@ -179,7 +179,6 @@ impl TokenOps for AtomicU32 {
 ///
 /// let limiter = Arc::new(RateLimiter::new(100, 10));
 ///
-/// // Share across multiple threads
 /// let mut handles = vec![];
 /// for _ in 0..4 {
 ///     let limiter = limiter.clone();
@@ -190,6 +189,9 @@ impl TokenOps for AtomicU32 {
 ///             }
 ///         }
 ///     }));
+/// }
+/// for h in handles {
+///     h.join().unwrap();
 /// }
 /// ```
 pub struct RateLimiter {
@@ -972,8 +974,15 @@ unsafe impl Sync for RateLimiter {}
 mod tests {
     use super::*;
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_basic_acquisition() {
-        let limiter = RateLimiter::new(10, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
         for _ in 0..10 {
             assert!(limiter.try_acquire());
@@ -983,8 +992,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_bulk_acquisition() {
-        let limiter = RateLimiter::new(10, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
         assert!(limiter.try_acquire_n(5));
         assert!(limiter.try_acquire_n(3));
@@ -1000,6 +1016,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_refill_mechanism() {
         let limiter = RateLimiter::new(10, 5);
 
@@ -1017,6 +1034,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_multiple_refill_periods() {
         let config = RateLimiterConfig {
             max_tokens: 20,
@@ -1038,28 +1056,38 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_add_tokens() {
-        let limiter = RateLimiter::new(10, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
-        // Use some tokens
         for _ in 0..5 {
             assert!(limiter.try_acquire());
         }
 
-        // Add tokens manually
         limiter.add_tokens(3);
         assert_eq!(limiter.available_tokens(), 8);
 
-        // Try to add beyond max
         limiter.add_tokens(20);
         assert_eq!(limiter.available_tokens(), 10);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_reset() {
-        let limiter = RateLimiter::new(10, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
-        // Use tokens and accumulate metrics
         for _ in 0..5 {
             assert!(limiter.try_acquire());
         }
@@ -1082,6 +1110,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_is_inactive() {
         let limiter = RateLimiter::new(10, 1);
 
@@ -1103,15 +1132,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_sustained_pressure() {
-        let limiter = RateLimiter::new(5, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 5,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
-        // Drain all tokens
         for _ in 0..5 {
             assert!(limiter.try_acquire());
         }
 
-        // Generate consecutive rejections
         for _ in 0..15 {
             assert!(!limiter.try_acquire());
         }
@@ -1122,6 +1156,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_adaptive_refill_under_pressure() {
         let limiter = RateLimiter::new(10, 10);
 
@@ -1154,6 +1189,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_cas_retry_exhaustion() {
         use std::sync::Arc;
         use std::thread;
@@ -1181,26 +1217,36 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_acquire_zero_tokens() {
-        let limiter = RateLimiter::new(10, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
-        // Acquiring 0 tokens should always succeed
         assert!(limiter.try_acquire_n(0));
 
-        // Drain all tokens
         for _ in 0..10 {
             assert!(limiter.try_acquire());
         }
 
-        // Should still succeed with 0
         assert!(limiter.try_acquire_n(0));
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_acquire_more_than_max() {
-        let limiter = RateLimiter::new(10, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
-        // Try to acquire more than max_tokens
         assert!(!limiter.try_acquire_n(11));
 
         let metrics = limiter.metrics();
@@ -1208,6 +1254,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_last_access_update_throttling() {
         let limiter = RateLimiter::new(100, 10);
 
@@ -1248,8 +1295,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_aba_fix_no_silent_drain() {
-        let limiter = RateLimiter::new(3, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 3,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
         // Acquire 2, leaving 1 token
         assert!(limiter.try_acquire_n(2));
@@ -1267,6 +1321,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_metrics_count_attempts_not_tokens() {
         let limiter = RateLimiter::new(100, 10);
 
@@ -1280,6 +1335,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_rejection_resets_consecutive_on_acquire() {
         let limiter = RateLimiter::new(5, 1);
 
@@ -1303,6 +1359,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_relaxed_ordering_mode() {
         let config = RateLimiterConfig {
             max_tokens: 20,
@@ -1323,6 +1380,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_sequential_ordering_mode() {
         let config = RateLimiterConfig {
             max_tokens: 10,
@@ -1339,6 +1397,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_concurrent_single_and_multi_acquire() {
         use std::sync::Arc;
         use std::thread;
@@ -1391,10 +1450,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_add_tokens_when_empty() {
-        let limiter = RateLimiter::new(10, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
-        // Drain all
         for _ in 0..10 {
             limiter.try_acquire();
         }
@@ -1413,10 +1478,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_pressure_ratio_calculation() {
-        let limiter = RateLimiter::new(5, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 5,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
-        // 5 acquired, 5 rejected => 50% pressure
         for _ in 0..5 {
             limiter.try_acquire();
         }
@@ -1430,6 +1501,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_refill_caps_at_max() {
         let config = RateLimiterConfig {
             max_tokens: 10,
@@ -1452,8 +1524,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_reset_clears_all_state() {
-        let limiter = RateLimiter::new(10, 5);
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 5,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
         for _ in 0..10 {
             limiter.try_acquire();
@@ -1474,14 +1553,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_try_acquire_n_exactly_max() {
-        let limiter = RateLimiter::new(10, 1);
+        let config = RateLimiterConfig {
+            max_tokens: 10,
+            refill_rate: 1,
+            refill_interval_ms: 600_000,
+            ordering: MemoryOrdering::AcquireRelease,
+        };
+        let limiter = RateLimiter::with_config(config);
 
-        // Acquiring exactly max should succeed
         assert!(limiter.try_acquire_n(10));
         assert_eq!(limiter.available_tokens(), 0);
 
-        // Now nothing left
         assert!(!limiter.try_acquire());
     }
 }

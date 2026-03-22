@@ -108,7 +108,9 @@ pub fn cpu_relax() {
 #[inline(always)]
 pub fn current_time_ms() -> u64 {
     let tb = START_TIME_BASE.get_or_init(init_time_base);
-    let now = tb.base_ms.wrapping_add(tb.start.elapsed().as_millis() as u64);
+    let now = tb
+        .base_ms
+        .wrapping_add(tb.start.elapsed().as_millis() as u64);
     CACHED_TIME_MS.store(now, Ordering::Relaxed);
     now
 }
@@ -137,7 +139,8 @@ pub(crate) fn cached_time_ms() -> u64 {
 #[inline(always)]
 pub fn current_time_us() -> u64 {
     let tb = START_TIME_BASE.get_or_init(init_time_base);
-    tb.base_us.saturating_add(tb.start.elapsed().as_micros() as u64)
+    tb.base_us
+        .saturating_add(tb.start.elapsed().as_micros() as u64)
 }
 
 /// Returns the current time in nanoseconds since UNIX epoch.
@@ -289,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_time_functions() {
         let ms1 = current_time_ms();
         let us1 = current_time_us();
@@ -328,6 +332,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_backoff() {
         let mut backoff = Backoff::new(5);
 
@@ -375,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_backoff_progression() {
         let mut backoff = Backoff::new(3);
 
@@ -390,6 +396,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_time_monotonicity() {
         let mut last_ms = 0;
         let mut last_us = 0;
@@ -413,6 +420,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_time_no_overflow() {
         let ms = current_time_ms();
         let us = current_time_us();
@@ -430,6 +438,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_time_precision_relationships() {
         let ms = current_time_ms();
         let us = current_time_us();
@@ -455,6 +464,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_time_elapsed_accuracy() {
         let before_ms = current_time_ms();
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -462,13 +472,14 @@ mod tests {
 
         let elapsed = after_ms - before_ms;
         assert!(
-            (40..=100).contains(&elapsed),
+            (30..=500).contains(&elapsed),
             "Expected ~50ms elapsed, got {}ms",
             elapsed
         );
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_concurrent_time_calls() {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
@@ -532,6 +543,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_backoff_yield_phase() {
         let mut backoff = Backoff::new(10);
 

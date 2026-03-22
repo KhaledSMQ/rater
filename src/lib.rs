@@ -377,8 +377,10 @@ mod tests {
     use std::thread;
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_basic_functionality() {
-        let limiter = RateLimiter::new(10, 1);
+        let config = RateLimiterConfig::new(10, 1, 600_000);
+        let limiter = RateLimiter::with_config(config);
 
         for _ in 0..10 {
             assert!(limiter.try_acquire());
@@ -410,6 +412,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_thread_safety() {
         let config = RateLimiterConfig::new(1000, 100, 60_000);
         let limiter = Arc::new(RateLimiter::with_config(config));
@@ -505,8 +508,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_metrics_after_mixed_operations() {
-        let limiter = RateLimiter::new(10, 1);
+        let config = RateLimiterConfig::new(10, 1, 600_000);
+        let limiter = RateLimiter::with_config(config);
 
         // 5 single acquires
         for _ in 0..5 {
@@ -533,6 +538,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_shared_limiter_across_threads() {
         let shared: SharedRateLimiter = std::sync::Arc::new(RateLimiter::new(100, 10));
         let mut handles = vec![];

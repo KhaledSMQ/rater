@@ -629,16 +629,13 @@ impl IpRateLimiterManager {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use std::sync::Arc;
     /// use rater::{IpRateLimiterManager, RateLimiterConfig};
     ///
     /// let config = RateLimiterConfig::per_second(100);
     /// let manager = Arc::new(IpRateLimiterManager::new(config));
     /// let handle = manager.clone().start_cleanup_thread();
-    ///
-    /// // The cleanup thread is now running in the background
-    /// // It will run until the program exits
     /// ```
     #[deprecated(
         since = "0.1.2",
@@ -897,13 +894,14 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_basic_ip_limiting() {
         use super::super::config::MemoryOrdering;
 
         let config = RateLimiterConfig {
             max_tokens: 5,
             refill_rate: 1,
-            refill_interval_ms: 1000,
+            refill_interval_ms: 600_000,
             ordering: MemoryOrdering::AcquireRelease,
         };
         let manager = IpRateLimiterManager::new(config);
@@ -925,6 +923,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_manager_cleanup() {
         let config = RateLimiterConfig::default();
         let manager = IpRateLimiterManager::with_cleanup_settings(
@@ -990,6 +989,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_concurrent_ip_access() {
         use super::super::config::MemoryOrdering;
 
@@ -1052,6 +1052,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_emergency_cleanup() {
         let config = RateLimiterConfig::default();
         let manager = IpRateLimiterManager::new(config);
@@ -1112,6 +1113,7 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
+    #[cfg_attr(miri, ignore)]
     fn test_cleanup_thread() {
         let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
             RateLimiterConfig::default(),
@@ -1140,6 +1142,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_stoppable_cleanup_thread() {
         let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
             RateLimiterConfig::default(),
@@ -1168,6 +1171,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_get_limiter_race_condition() {
         let manager = Arc::new(IpRateLimiterManager::new(RateLimiterConfig::default()));
         let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
@@ -1191,6 +1195,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_concurrent_emergency_cleanup() {
         let manager = Arc::new(IpRateLimiterManager::new(RateLimiterConfig::default()));
 
@@ -1224,6 +1229,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_cleanup_with_active_limiters() {
         let manager =
             IpRateLimiterManager::with_cleanup_settings(RateLimiterConfig::default(), 1000, 100);
@@ -1278,11 +1284,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_try_acquire_n() {
         let manager = IpRateLimiterManager::new(RateLimiterConfig {
             max_tokens: 10,
             refill_rate: 1,
-            refill_interval_ms: 1000,
+            refill_interval_ms: 600_000,
             ordering: MemoryOrdering::AcquireRelease,
         });
 
@@ -1310,6 +1317,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_active_count_reconciliation_after_cleanup() {
         let manager = IpRateLimiterManager::with_cleanup_settings(
             RateLimiterConfig::default(),
@@ -1381,11 +1389,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_ipv6_support() {
         let manager = IpRateLimiterManager::new(RateLimiterConfig {
             max_tokens: 10,
             refill_rate: 1,
-            refill_interval_ms: 1000,
+            refill_interval_ms: 600_000,
             ordering: MemoryOrdering::AcquireRelease,
         });
 
@@ -1409,6 +1418,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_concurrent_cleanup_and_acquire() {
         let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
             RateLimiterConfig {
@@ -1546,11 +1556,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_clear_then_reuse() {
         let manager = IpRateLimiterManager::new(RateLimiterConfig {
             max_tokens: 5,
             refill_rate: 1,
-            refill_interval_ms: 1000,
+            refill_interval_ms: 600_000,
             ordering: MemoryOrdering::AcquireRelease,
         });
 
@@ -1572,6 +1583,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_stoppable_thread_stops_on_sender_drop() {
         let manager = Arc::new(IpRateLimiterManager::with_cleanup_settings(
             RateLimiterConfig::default(),
