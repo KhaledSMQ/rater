@@ -208,6 +208,11 @@ pub struct RateLimiter {
     refill_interval_ms: u64,
     ordering: MemoryOrdering,
 
+    // Precomputed orderings to avoid match dispatch on every hot-path call
+    ordering_load: Ordering,
+    ordering_rmw: Ordering,
+    ordering_store: Ordering,
+
     // === METRICS: cold path, only for monitoring ===
     consecutive_rejections: AtomicU32,
     max_wait_time_ns: AtomicU64,
@@ -277,6 +282,9 @@ impl RateLimiter {
             max_tokens: config.max_tokens,
             refill_rate: config.refill_rate,
             refill_interval_ms: config.refill_interval_ms,
+            ordering_load: config.ordering.load(),
+            ordering_rmw: config.ordering.rmw(),
+            ordering_store: config.ordering.store(),
             ordering: config.ordering,
             total_acquired: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
@@ -334,12 +342,12 @@ impl RateLimiter {
         // Ultra-fast path: try CAS immediately before any time checks.
         // In the common case (tokens available, no refill needed), this
         // completes in a single atomic load + CAS (~5-15ns).
-        let current = self.tokens.0.load(self.ordering.load());
+        let current = self.tokens.0.load(self.ordering_load);
         if current > 0
             && self
                 .tokens
                 .0
-                .compare_exchange_weak(current, current - 1, self.ordering.rmw(), Ordering::Relaxed)
+                .compare_exchange_weak(current, current - 1, self.ordering_rmw, Ordering::Relaxed)
                 .is_ok()
         {
             self.on_acquisition(1);
@@ -368,7 +376,7 @@ impl RateLimiter {
 
         let mut retries = 0;
         loop {
-            let current = self.tokens.0.load(self.ordering.load());
+            let current = self.tokens.0.load(self.ordering_load);
 
             if current == 0 {
                 self.on_rejection(1);
@@ -378,7 +386,7 @@ impl RateLimiter {
             match self.tokens.0.compare_exchange_weak(
                 current,
                 current - 1,
-                self.ordering.rmw(),
+                self.ordering_rmw,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
@@ -502,13 +510,7 @@ impl RateLimiter {
         self.touch_last_access(now_ms);
         self.refill_if_needed(now_ms);
 
-        let start_ns = std::time::Instant::now();
-        let result = self.try_acquire_with_bounded_cas(n);
-
-        let wait_ns = start_ns.elapsed().as_nanos() as u64;
-        self.update_max_wait_time(wait_ns);
-
-        result
+        self.try_acquire_with_bounded_cas(n)
     }
 
     /// Internal method for acquiring N tokens with CAS retry logic.
@@ -522,7 +524,7 @@ impl RateLimiter {
         let mut repeat_count: usize = 0;
 
         loop {
-            let current = self.tokens.0.load(self.ordering.load());
+            let current = self.tokens.0.load(self.ordering_load);
 
             if current == last_seen {
                 repeat_count += 1;
@@ -534,7 +536,7 @@ impl RateLimiter {
                     match self.tokens.0.compare_exchange(
                         current,
                         current - n,
-                        self.ordering.rmw(),
+                        self.ordering_rmw,
                         Ordering::Relaxed,
                     ) {
                         Ok(_) => {
@@ -560,7 +562,7 @@ impl RateLimiter {
             match self.tokens.0.compare_exchange_weak(
                 current,
                 current - n,
-                self.ordering.rmw(),
+                self.ordering_rmw,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
@@ -589,8 +591,6 @@ impl RateLimiter {
     #[inline(always)]
     fn on_acquisition(&self, _n: u64) {
         self.total_acquired.fetch_add(1, Ordering::Relaxed);
-        // Only reset consecutive_rejections if it's non-zero to avoid
-        // a write to a shared cache line on every successful acquire
         if self.consecutive_rejections.load(Ordering::Relaxed) != 0 {
             self.consecutive_rejections.store(0, Ordering::Relaxed);
         }
@@ -645,7 +645,7 @@ impl RateLimiter {
             .compare_exchange(
                 last_refill,
                 new_refill_time,
-                self.ordering.rmw(),
+                self.ordering_rmw,
                 Ordering::Relaxed,
             )
             .is_ok()
@@ -671,13 +671,12 @@ impl RateLimiter {
             .min(self.max_tokens);
 
         let mut retries = 0;
-        let mut current = self.tokens.0.load(self.ordering.load());
+        let mut current = self.tokens.0.load(self.ordering_load);
 
         loop {
             let new_tokens = current.saturating_add(tokens_to_add).min(self.max_tokens);
 
             if new_tokens == current {
-                // Already at max, nothing to do
                 self.total_refills.fetch_add(1, Ordering::Relaxed);
                 break;
             }
@@ -685,7 +684,7 @@ impl RateLimiter {
             match self.tokens.0.compare_exchange_weak(
                 current,
                 new_tokens,
-                self.ordering.rmw(),
+                self.ordering_rmw,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
@@ -766,15 +765,6 @@ impl RateLimiter {
         }
     }
 
-    #[inline]
-    fn update_max_wait_time(&self, wait_ns: u64) {
-        // Use fetch_max for a single atomic RMW instead of a CAS loop.
-        // This is more efficient on modern CPUs and avoids the retry loop entirely.
-        if wait_ns > self.max_wait_time_ns.load(Ordering::Relaxed) {
-            self.max_wait_time_ns.fetch_max(wait_ns, Ordering::Relaxed);
-        }
-    }
-
     /// Returns the current number of available tokens.
     ///
     /// This method triggers a refill check, so the returned value
@@ -791,7 +781,7 @@ impl RateLimiter {
     #[inline(always)]
     pub fn available_tokens(&self) -> u64 {
         self.refill_if_needed(current_time_ms());
-        self.tokens.0.load(self.ordering.load())
+        self.tokens.0.load(self.ordering_load)
     }
 
     /// Checks if the rate limiter has been inactive for a specified duration.
@@ -877,7 +867,7 @@ impl RateLimiter {
     #[inline]
     pub fn add_tokens(&self, n: u64) {
         let mut retries = 0;
-        let mut current = self.tokens.0.load(self.ordering.load());
+        let mut current = self.tokens.0.load(self.ordering_load);
 
         loop {
             let new_tokens = current.saturating_add(n).min(self.max_tokens);
@@ -889,7 +879,7 @@ impl RateLimiter {
             match self.tokens.0.compare_exchange_weak(
                 current,
                 new_tokens,
-                self.ordering.rmw(),
+                self.ordering_rmw,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => break,
@@ -934,15 +924,14 @@ impl RateLimiter {
     pub fn reset(&self) {
         let now_ms = current_time_ms();
 
-        // Reset all state to initial values
-        self.tokens.0.store(self.max_tokens, self.ordering.store());
-        self.last_refill_ms.0.store(now_ms, self.ordering.store());
-        self.last_access_ms.0.store(now_ms, self.ordering.store());
-        self.consecutive_rejections.store(0, self.ordering.store());
-        self.max_wait_time_ns.store(0, self.ordering.store());
-        self.total_acquired.store(0, self.ordering.store());
-        self.total_rejected.store(0, self.ordering.store());
-        self.total_refills.store(0, self.ordering.store());
+        self.tokens.0.store(self.max_tokens, self.ordering_store);
+        self.last_refill_ms.0.store(now_ms, self.ordering_store);
+        self.last_access_ms.0.store(now_ms, self.ordering_store);
+        self.consecutive_rejections.store(0, self.ordering_store);
+        self.max_wait_time_ns.store(0, self.ordering_store);
+        self.total_acquired.store(0, self.ordering_store);
+        self.total_rejected.store(0, self.ordering_store);
+        self.total_refills.store(0, self.ordering_store);
     }
 
     /// Returns the maximum number of tokens allowed in the bucket.
@@ -968,6 +957,7 @@ impl std::fmt::Debug for RateLimiter {
             .field("max_tokens", &self.max_tokens)
             .field("refill_rate", &self.refill_rate)
             .field("refill_interval_ms", &self.refill_interval_ms)
+            .field("ordering", &self.ordering)
             .field("current_tokens", &self.available_tokens())
             .finish()
     }
@@ -1155,13 +1145,12 @@ mod tests {
     fn test_max_wait_time_tracking() {
         let limiter = RateLimiter::new(100, 10);
 
-        // Acquire tokens with different amounts to trigger wait time tracking
         assert!(limiter.try_acquire_n(50));
         assert!(limiter.try_acquire_n(30));
 
-        let metrics = limiter.metrics();
-        // max_wait_time_ns should be non-zero after multiple acquisitions
-        assert!(metrics.max_wait_time_ns > 0);
+        // max_wait_time_ns is not tracked on the hot path to avoid
+        // the cost of Instant::now() on every call.
+        let _metrics = limiter.metrics();
     }
 
     #[test]

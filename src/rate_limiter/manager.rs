@@ -404,10 +404,12 @@ impl IpRateLimiterManager {
             }
         }
 
-        // Sort by idle time (most idle first - LRU eviction)
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        // Partial sort: move the `to_remove_count` most-idle entries to the front in O(n)
+        // instead of a full O(n log n) sort.
+        if candidates.len() > to_remove_count {
+            candidates.select_nth_unstable_by(to_remove_count - 1, |a, b| b.0.cmp(&a.0));
+        }
 
-        // Remove the most idle entries
         for (_, ip) in candidates.iter().take(to_remove_count) {
             if self.limiters.remove(ip).is_some() {
                 self.active_count.fetch_sub(1, Ordering::AcqRel);
@@ -471,7 +473,13 @@ impl IpRateLimiterManager {
             return entry.value().try_acquire();
         }
         // Slow path: create new limiter then acquire
-        match self.get_limiter(ip) {
+        self.try_acquire_slow(ip)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn try_acquire_slow(&self, ip: IpAddr) -> bool {
+        match self.get_limiter_slow(ip) {
             Some(limiter) => limiter.try_acquire(),
             None => false,
         }
@@ -497,7 +505,7 @@ impl IpRateLimiterManager {
             return entry.value().try_acquire_n(n);
         }
         // Slow path: create new limiter then acquire
-        match self.get_limiter(ip) {
+        match self.get_limiter_slow(ip) {
             Some(limiter) => limiter.try_acquire_n(n),
             None => false,
         }

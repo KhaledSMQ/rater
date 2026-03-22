@@ -30,19 +30,29 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // Monotonic time base to prevent issues when the system clock jumps.
 // Microseconds are used as the base unit to avoid u64 overflow.
-static START_TIME_BASE: OnceLock<(Instant, u64)> = OnceLock::new();
+static START_TIME_BASE: OnceLock<TimeBase> = OnceLock::new();
 
 // Coarsely cached millisecond timestamp. Updated on every call to
 // current_time_ms(). This avoids redundant Instant::elapsed() calls
 // within the same millisecond (common under high throughput).
 static CACHED_TIME_MS: AtomicU64 = AtomicU64::new(0);
 
-fn init_time_base() -> (Instant, u64) {
+struct TimeBase {
+    start: Instant,
+    base_us: u64,
+    base_ms: u64,
+}
+
+fn init_time_base() -> TimeBase {
     let epoch_us = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as u64;
-    (Instant::now(), epoch_us)
+    TimeBase {
+        start: Instant::now(),
+        base_us: epoch_us,
+        base_ms: epoch_us / 1_000,
+    }
 }
 
 /// CPU-specific relaxation hint for spin loops.
@@ -97,8 +107,8 @@ pub fn cpu_relax() {
 /// ```
 #[inline(always)]
 pub fn current_time_ms() -> u64 {
-    let (start, base_us) = START_TIME_BASE.get_or_init(init_time_base);
-    let now = (base_us / 1_000).wrapping_add(start.elapsed().as_millis() as u64);
+    let tb = START_TIME_BASE.get_or_init(init_time_base);
+    let now = tb.base_ms.wrapping_add(tb.start.elapsed().as_millis() as u64);
     CACHED_TIME_MS.store(now, Ordering::Relaxed);
     now
 }
@@ -126,8 +136,8 @@ pub(crate) fn cached_time_ms() -> u64 {
 /// ```
 #[inline(always)]
 pub fn current_time_us() -> u64 {
-    let (start, base_us) = START_TIME_BASE.get_or_init(init_time_base);
-    base_us.saturating_add(start.elapsed().as_micros() as u64)
+    let tb = START_TIME_BASE.get_or_init(init_time_base);
+    tb.base_us.saturating_add(tb.start.elapsed().as_micros() as u64)
 }
 
 /// Returns the current time in nanoseconds since UNIX epoch.
@@ -147,10 +157,10 @@ pub fn current_time_us() -> u64 {
 /// ```
 #[inline(always)]
 pub fn current_time_ns() -> u64 {
-    let (start, base_us) = START_TIME_BASE.get_or_init(init_time_base);
-    base_us
+    let tb = START_TIME_BASE.get_or_init(init_time_base);
+    tb.base_us
         .saturating_mul(1_000)
-        .saturating_add(start.elapsed().as_nanos() as u64)
+        .saturating_add(tb.start.elapsed().as_nanos() as u64)
 }
 
 /// Cache-aligned wrapper for values to prevent false sharing.
