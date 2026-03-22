@@ -8,6 +8,9 @@
 
 A high-performance, lock-free rate limiting library for Rust. It uses the token bucket algorithm under the hood and comes with built-in per-IP rate limiting, so you can drop it into a web server and start throttling requests in minutes.
 
+
+[![How Rater Works](https://img.youtube.com/vi/pqw7yyAcFGA/maxresdefault.jpg)](https://youtu.be/pqw7yyAcFGA)
+
 ## Features
 
 - **Lock-free & thread-safe** -- atomic CAS operations instead of mutexes, so threads never block each other
